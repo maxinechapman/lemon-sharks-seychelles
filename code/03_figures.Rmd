@@ -1,6 +1,6 @@
 ---
 title: "2023_01_25_plotting_MC"
-author: "Maxine Chapman"
+author: "Maxine Chapman and Giorgos Papageorgiou"
 date: "2023-01-25"
 output: html_document
 ---
@@ -436,4 +436,5 @@ table_1 <- plot_df %>%
 
 write.csv(table_1, "../results/table_1.csv", row.names = F)
 ```
+
 
