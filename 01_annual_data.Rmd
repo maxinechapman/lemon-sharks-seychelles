@@ -1,7 +1,7 @@
 ---
 title: "annual_data"
-author: "Maxine Chapman"
-date: "2023_01_23"
+author: "Maxine Chapman and Giorgos Papageorgiou"
+date: "2025_04_23"
 output: html_document
 editor_options: 
   chunk_output_type: console
@@ -662,4 +662,5 @@ ggplot(df, aes(x = ISO.date, y = FishID, colour = Habitat)) +
 ```{r}
 ggsave("../results/all_detections.pdf", width = 10, height = 6)
 ```
+
 
