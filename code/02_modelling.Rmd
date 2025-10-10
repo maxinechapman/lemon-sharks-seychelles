@@ -1,7 +1,7 @@
 ---
 title: "modelling"
-author: "Maxine Chapman"
-date: "2023-04-14"
+author: "Maxine Chapman and Giorgos Papageorgiou"
+date: "2025-03-20"
 output: html_document
 ---
 
@@ -142,4 +142,5 @@ glm.diag.plots(binary_glm2)
 # compare models
 anova(binary_glm, binary_glm2, test = "Chisq" )
 ```
+
 
