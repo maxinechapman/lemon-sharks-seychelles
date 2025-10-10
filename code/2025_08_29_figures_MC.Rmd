@@ -1,0 +1,439 @@
+---
+title: "2023_01_25_plotting_MC"
+author: "Maxine Chapman"
+date: "2023-01-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Plots based on the annual results dataframe (not raw data directly).
+
+# Setup
+
+```{r}
+rm(list =ls()) #clear environments
+```
+
+
+## packages
+
+```{r}
+library(ggplot2)
+library(ggsignif)
+library(lme4)
+library(performance)
+library(cowplot)
+library(dplyr)
+library(ggsci)
+library(geomtextpath)
+library(forcats)
+library(r2r)
+library(magick)
+```
+
+## read in data
+
+```{r}
+#cutoff data with less than 40 tracking days
+results_df <- read.csv("../results/results_dataframe_annual.csv")
+plot_df <- results_df[results_df$n_tracking_days > 40, ]
+```
+
+```{r}
+#total tracking days per shark
+summary_df <- plot_df %>% group_by(shark_ID) %>% summarize(total_tracking_period = sum(tracking_period, na.rm = TRUE))
+```
+
+```{r}
+#read in receiver data
+receiver_data = read.csv("../data/raw/acoustic_metadata/darros_receiver_details.csv")
+#round lat and lon to 3 sf for matching with the shark data
+receiver_data$Lat<-round(receiver_data$Lat,3)
+receiver_data$Long<-round(receiver_data$Long,3)
+
+#rename receiver ID column for clarity
+colnames(receiver_data)[which(colnames(receiver_data) == "DSJ.Code")] <- "ReceiverID"
+
+#head(receiver_data)
+```
+
+
+## set key variables
+
+```{r}
+percent <- 80 #set percentage value of mcp to use for analyses
+raw_percent_data <- plot_df$mcp_area_80  #select corresponding mcp data for plotting
+percent_data <- raw_percent_data + 1
+
+growth_rate <- "slow" #12.5cm per year growth rate is slow/15.5cm per year is fast
+size <- plot_df$size_slow 
+
+#make filepath
+filepath <- file.path("..", "results", "mcp_plots", percent)
+filepath1 <- file.path("..", "results", "mcp_plots", "80", "mcp_80")
+filepath2 <-file.path("..", "results", "figures")
+
+#values without cutoff data(for combined plot)
+percent_data_2 <- (results_df$mcp_area_80) + 1 
+tracking <- results_df$n_tracking_days
+binary <- results_df$binary_cat
+size_2 <- results_df$size_slow
+
+#create new file for MCP % if it doesn't exist yet, to save plots in
+if (! dir.exists(file.path("..", "results", "mcp_plots", percent))) {
+  dir.create(file.path("..", "results", "mcp_plots", percent))
+}
+```
+
+
+# Main Figures
+
+## fig. 1: Receiver maps
+
+```{r}
+#read in figures
+img1 <- magick::image_read("../results/habitat_receiver_plot_big.png")
+img2 <- magick::image_read("../results/habitat_receiver_plot.png")
+img3 <- magick::image_read("../results/binary_receiver_plot_big.png")
+img4 <- magick::image_read("../results/binary_receiver_plot.png")
+
+#convert to ggplot
+g1 <- cowplot::ggdraw() + cowplot::draw_image(img1) + theme(plot.margin = margin(5, 5, 5, 0))
+g2 <- cowplot::ggdraw() + cowplot::draw_image(img2) + theme(plot.margin = margin(5, 0, 5, 5)) 
+g3 <- cowplot::ggdraw() + cowplot::draw_image(img3) + theme(plot.margin = margin(5, 5, 5, 0))
+g4 <- cowplot::ggdraw() + cowplot::draw_image(img4) + theme(plot.margin = margin(5, 0, 5, 5)) 
+```
+
+```{r}
+filename <- "figure_1_receiver_maps.png"
+
+cowplot::plot_grid(g1, g2, g3, g4,
+                   labels = "auto",   
+                   nrow = 2 
+                   #rel_widths = c(1, 1.1)
+                   )
+
+ggsave(filename, path = filepath2)
+rm(filename)
+```
+
+## fig. 2: Descriptive Plot
+
+```{r}
+#make new columns
+included_sharks <- unique(plot_df$shark_ID)
+
+#plot_df <- plot_df %>% #over 40 tracking days
+describe_df <- results_df %>% #includes all sharks
+  dplyr::mutate(log_detections = log10(num_detections)) %>%
+  dplyr::group_by(shark_ID) %>%
+  dplyr::mutate(start_year = min(year)) %>%
+  dplyr::mutate(end_year = max(year)) %>%
+  dplyr::mutate(total_days = sum(n_tracking_days)) %>%
+  dplyr::mutate(included = ifelse(shark_ID %in% included_sharks, "included", "not included")) %>% 
+  arrange(desc(included), shark_ID)
+  #dplyr::mutate(shark_ID = factor(shark_ID, levels = unique(shark_ID)))
+
+describe_df$shark_ID <- factor(describe_df$shark_ID, levels = unique(describe_df$shark_ID))
+
+maturity_df <- describe_df %>%
+  filter(maturity_slow == "mature") %>%
+  group_by(shark_ID) %>%
+  summarize(maturity_year = min(year), .groups = "drop")
+
+# Step 3: Merge maturity year back into main dataframe
+describe_df <- left_join(describe_df, maturity_df, by = "shark_ID")
+
+
+shade_df <- describe_df %>%
+  filter(included == "not included") %>%
+  distinct(shark_ID) %>%
+  mutate(
+    xmin = as.numeric(shark_ID) - 0.5,
+    xmax = as.numeric(shark_ID) + 0.5,
+    ymin = -Inf,   # cover all years
+    ymax = Inf
+  )
+```
+
+NB: The plot appears differently (less cramped) in saved files than in R due to different dimensions in save.
+
+```{r}
+ggplot(describe_df, aes(x = factor(shark_ID), y = year, ymin = year, ymax = year + 1, fill = log_detections)) +
+  geom_crossbar(aes(size = NA), width = 0.6) +  # narrower bars
+  geom_text(label = "Tracking days", y = 2024, x = length(unique(describe_df$shark_ID)) + 1, hjust = 0.6) + #label tracking days column
+  coord_flip() +
+  scale_fill_gradient(low = "#999999", high = "#377EB8") +
+  scale_y_continuous(breaks = 2012:2022, expand = expansion(mult = c(0, 0.15))) +
+  #scale_y_discrete(expand = expansion(add = c(0, 2))) +
+  scale_x_discrete(expand = expansion(add = c(0, 2))) +  #more horizontal space for shark_ID
+  #labs(title = "Shark Tracking Data Visualisation", x = "Shark ID", y = "Year", fill = "log(number of detections)") +
+  labs(x = "Shark ID", y = "Year", fill = "log (number of detections)") +
+  #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(size = FALSE) +
+  geom_text(aes(y = 2024, label = total_days), vjust = 0.5) +
+  theme(panel.grid.major.y = element_line(linewidth = 1, colour = "grey"), axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme_bw() +
+  geom_rect(data = shade_df,
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+            fill = "grey80", alpha = 0.5,
+            inherit.aes = FALSE) + #grey out irrelevant data
+  geom_segment(
+  data = maturity_df,
+  aes(
+    x = shark_ID,
+    xend = shark_ID,
+    y = maturity_year - 0.05,
+    yend = maturity_year + 0.05
+  ),
+  color = "#F8766D",
+  size = 1,
+  inherit.aes = FALSE
+)
+  
+#saving
+#filename <- "figure_2_descriptive.png"
+filename <- "figure_6_descriptive_fast.png"
+ggsave(filename, path = filepath2, height = 12)
+```
+
+## fig. 3: tracking days v mcp plot
+
+Justify choice to cutoff number of tracking days > 40.
+
+```{r}
+#combine plots with and without cutoff for number of tracking days
+
+#create filename for saving
+filename <- "figure_7_tracking_days_fast.png"
+#filename <- "figure_3_tracking_days.png"
+
+png(paste0(filepath2, "/", filename), width = 3000, height = 2000, res = 300)
+
+#pdf(paste0(filepath, "/", filename))
+
+#plot without cutoff
+days <- ggplot2::ggplot(data =  results_df) +
+  ggplot2::geom_point(aes(x = tracking, y = percent_data_2)) +
+  #ggplot2::ggtitle(paste0("Tracking days(all) v ", percent, "% MCP")) +
+  geom_smooth(aes(x = tracking, y = percent_data_2), se = FALSE, span = 0.8, colour = "#377EB8") +
+  ylab(paste0("Log (", percent, "% MCP area)")) +
+  xlab("Tracking days") +
+  #labs(col = "Shark ID") + 
+  scale_y_log10(limits = c(1, 150)) +
+  scale_x_continuous(limits = c(0, NA)) +
+  #guides(color = FALSE) + # Hide legend for color
+  geom_vline(xintercept = 40, colour  = "#F8766D", linetype = "longdash", size = 1.2) + #add 40 day line
+  annotate("text", x = 40, y = 1, label = "40", colour = "#F8766D", vjust = 4, size = 3.5) +
+  coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"), 
+        plot.margin = margin(10, 10, 30, 10)) 
+
+#plot with 40 day cutoff
+days_limited <- ggplot2::ggplot(data =  plot_df) +
+  ggplot2::geom_point(aes(x = n_tracking_days, y = percent_data)) +
+  #ggplot2::ggtitle(paste0("Tracking days(>40) v ", percent, "% MCP")) +
+  ylab(paste0("Log (", percent, "% MCP area)")) +
+  xlab("Tracking days") +
+  #labs(col = "Shark ID") + 
+  geom_smooth(aes(x = n_tracking_days, y = percent_data), se = FALSE, span = 0.8, colour = "#377EB8") +
+  scale_y_log10(limits = c(1, 150)) +
+  #scale_x_continuous(limits = c(0, NA)) +
+  #guides(color = FALSE) + # Hide legend for color
+  # geom_vline(xintercept = 40, colour  = "red", linetype = "longdash", size = 1.2) +
+  # annotate("text", x = 40, y = 1, label = "40", colour = "red", vjust = 3, size = 3.5) +
+  # coord_cartesian(clip = 'off') +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, size = 15, face = "bold"), 
+        plot.margin = margin(10, 10, 30, 10)) 
+
+#display plots
+combined_legend <- cowplot::get_legend(days_limited)
+cowplot::plot_grid(days, days_limited, labels = "auto", align = "h", axis = "tb")
+
+#stop save
+dev.off()
+
+#remove uneccessary objects
+rm(filename)
+```
+
+## fig. 4: shark size v mcp area
+
+```{r}
+#plotting
+ggplot2::ggplot(data = plot_df) +
+  #ggplot2::geom_point(aes(x = size, y = percent_data, colour = factor(shark_ID))) +
+  ggplot2::geom_point(aes(x = size_slow, y = percent_data)) +
+  #ggplot2::ggtitle(paste0("Shark size v ", percent, "% MCP area")) +
+  scale_y_log10() +
+  ylab(paste0("Log (", percent,"% MCP area)")) +
+  xlab("Estimated shark size (cm)") +
+  #theme(text = element_text(size = 16)) +
+  #geom_abline(intercept =  -0.2513395, slope = 0.003383697, colour = "red") 
+  geom_abline(intercept = -0.50948, slope = 0.0046877, colour = "#F8766D") + #mlm result
+  # geom_line(data = pred_df, aes(x = size_slow, y = 10^predicted - 1), colour = "#F8766D", size = 1) +
+  theme_bw()
+
+
+#creating filepaths and name
+filename <- "figure_4_size_mcp.png"
+
+ggsave(filename, path = filepath2)
+
+rm(filename)
+```
+
+## fig. 5: boxplots for resident v exploratory
+
+```{r}
+#counts for sample sizes
+count <- plot_df %>%
+  group_by(binary_cat) %>%
+  summarise(count = n()) 
+
+count <- count %>%
+  mutate(label = paste(binary_cat, "\nn =", count))
+```
+
+```{r}
+ggplot2::ggplot(data = plot_df, aes(x = binary_cat, y = size, fill = binary_cat)) +
+  ggplot2::geom_boxplot() +
+  #2ggplot2::ggtitle("Shark Size v Behaviour") +
+  xlab("Behaviour") +
+  ylab(paste0("Estimated size (", growth_rate, " growth rate)")) +
+  #theme(text = element_text(size = 16)) +
+  geom_hline(yintercept = 220, linetype = "dashed", colour = "#F8766D") +
+  annotate("text", x = 2.5, y = 220, label = "size at maturity",
+           color = "#F8766D", hjust = 0, vjust = -0.5) +
+  #scale_x_discrete(expand = expansion(add = c(0.8, 1.2))) +
+  scale_x_discrete(labels = setNames(count$label, count$binary_cat), expand = expansion(add = c(0.8, 1.2))) +
+  #scale_fill_npg() +
+  scale_fill_manual(values = c("#F8766D", "#377EB8")) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+
+#filename <- "figure_5_resident_exploratory.png"
+filename <- "figure_9_resident_exploratory_fast.png"
+
+
+ggsave(filename, path = filepath2)
+rm(filename)
+
+```
+
+# Supplementary Figures
+
+## fig 6. shark_size v mcp area with FAST growth rate
+
+```{r}
+size_fast <- plot_df$size_fast
+```
+
+
+```{r}
+#plotting
+ggplot2::ggplot(data = plot_df) +
+  #ggplot2::geom_point(aes(x = size, y = percent_data, colour = factor(shark_ID))) +
+  ggplot2::geom_point(aes(x = size_fast, y = percent_data)) +
+  #ggplot2::ggtitle(paste0("Shark size v ", percent, "% MCP area")) +
+  scale_y_log10() +
+  ylab(paste0("Log (", percent,"% MCP area)")) +
+  xlab("Estimated shark size (cm)") +
+  #theme(text = element_text(size = 16)) +
+  geom_abline(intercept = -0.397855, slope = 0.003951, colour = "#F8766D") +
+  theme_bw()
+
+
+#creating filepaths and name
+filename <- "figure_8_size_mcp.png"
+
+ggsave(filename, path = filepath2)
+
+rm(filename)
+```
+
+## fig. 10. maturity v range size for male/female
+
+```{r}
+#female shark data
+female_df <- plot_df[plot_df$sex == "f", ]
+
+#male shark data
+male_df <- plot_df[plot_df$sex == "m", ]
+```
+
+```{r}
+#create filename for saving
+filename <- "figure_10_sex.png"
+
+png(paste0(filepath2, "/", filename), width = 2000, height = 2400, res = 300)
+#pdf(paste0(filepath, "/", filename))
+
+#female_plot
+female <- ggplot2::ggplot(data = female_df, aes(x = maturity_slow, y = log(mcp_area_80), fill = maturity_slow)) +
+  ggplot2::geom_boxplot() +
+  xlab("Female maturity (>220cm)") +
+  ylab((paste0("Log (80% MCP area)"))) +
+  scale_fill_manual(values = c("#F8766D", "#377EB8")) +
+  scale_y_continuous(limits = c(-2.5, 3)) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+#male_plot
+male <- ggplot2::ggplot(data = male_df, aes(x = maturity_slow, y = log(mcp_area_80), fill = maturity_slow)) +
+  ggplot2::geom_boxplot() +
+  xlab("Male maturity (>220cm)") +
+  ylab((paste0("Log (80% MCP area)"))) +
+  scale_fill_manual(values = c("#F8766D", "#377EB8")) +
+  scale_y_continuous(limits = c(-2.5, 3)) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+#display plots
+cowplot::plot_grid(female, male, labels = "auto", align = "h", axis = "tb")
+
+#stop save
+#dev.off()
+
+#remove uneccessary objects
+rm(filename)
+```
+
+## Table 1. Average MCP by size class
+
+```{r}
+table_1 <- plot_df %>%
+  mutate(
+    maturity_class = factor(case_when(
+      size_slow < 130 ~ "juvenile",
+      size_slow >= 130 & size_slow <= 220 ~ "subadult",
+      size_slow > 220 ~ "adult",
+      TRUE ~ NA_character_
+    ), levels = c("juvenile", "subadult", "adult"))
+  ) %>%
+  group_by(maturity_class) %>%
+  summarise(
+    size = dplyr::first(c("< 130", "130–220", "> 220")[match(maturity_class, c("juvenile","subadult","adult"))]),
+    # MCP_100 = signif(mean(mcp_area_100, na.rm = TRUE), 2), #2sf 
+    # MCP_95 = signif(mean(mcp_area_95, na.rm = TRUE), 2),
+    # MCP_80 = signif(mean(mcp_area_80, na.rm = TRUE), 2),
+    # IQR_80 = signif(IQR(mcp_area_80, na.rm = TRUE), 2),
+    # MCP_70 = signif(mean(mcp_area_70, na.rm = TRUE), 2),
+    # MCP_60 = signif(mean(mcp_area_60, na.rm = TRUE), 2)
+    MCP_100 = round(mean(mcp_area_100, na.rm = TRUE), 1), #1dp
+    MCP_90  = round(mean(mcp_area_90, na.rm = TRUE), 1),
+    MCP_80  = round(mean(mcp_area_80, na.rm = TRUE), 1),
+    IQR_80  = round(IQR(mcp_area_80, na.rm = TRUE), 1),
+    MCP_70  = round(mean(mcp_area_70, na.rm = TRUE), 1),
+    MCP_60  = round(mean(mcp_area_60, na.rm = TRUE), 1),
+  )
+
+write.csv(table_1, "../results/table_1.csv", row.names = F)
+```
+

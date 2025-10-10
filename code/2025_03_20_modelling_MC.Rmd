@@ -1,0 +1,145 @@
+---
+title: "modelling"
+author: "Maxine Chapman"
+date: "2023-04-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Setup
+
+```{r}
+rm(list =ls()) # clear environment
+
+library(lme4) # add libraries
+library(boot)
+library(rstatix)
+library(ggpubr)
+library(numDeriv)
+
+source("plot_lmer_diag_loess.R") #load code to plot mixed model diagnostic plots
+```
+
+## Make datasets
+
+```{r}
+complete_df <- read.csv("../results/results_dataframe_annual.csv") #read in data
+head(complete_df)
+
+plot_df <- complete_df[complete_df$n_tracking_days > 40, ] #filter for number of tracking days
+plot_df <- na.omit(complete_df) #remove na values for linear modelling
+head(plot_df)
+
+#plot_df <- plot_df[plot_df$shark_ID != 368, ] #remove potential outlier
+```
+
+## Set growth rates
+
+```{r}
+#select sizes produced by either slow or fast growth rate
+size <- plot_df$size_fast 
+size_all <- complete_df$size_fast
+```
+
+
+## Fixed effect models
+
+```{r}
+lm <- lm(data = plot_df, log10(mcp_area_80+1) ~ size + log(n_tracking_days) + shark_ID + sex) #make lm with size
+summary(lm) #show model output
+```
+
+```{r}
+par(mfrow = c(2, 2)) #display plots correctly
+plot(lm) #make diagnostic plots
+```
+
+```{r}
+lm2 <- lm(data = plot_df, log10(mcp_area_80+1) ~ log(n_tracking_days) + shark_ID + sex) # make lm without size
+summary(lm2) #show model output
+```
+
+```{r}
+par(mfrow = c(2, 2)) #display
+plot(lm2) #diagnostic plots
+```
+
+```{r}
+anova(lm, lm2) #compare models
+```
+
+Shows the model with size is significantly better than the model without size, indicating that size is a significant predictor of MCP. 
+
+## Mixed effect model
+
+```{r}
+mixed_lm <- lmer(log10(mcp_area_80+1) ~ size + log(n_tracking_days) + (1|shark_ID) + sex, data = plot_df) #full model
+summary(mixed_lm) #show model output
+```
+
+```{r}
+mixed_lm2 <- lmer(log10(mcp_area_80+1) ~ log(n_tracking_days) + (1|shark_ID) + sex, data = plot_df) #mixed model without size
+summary(mixed_lm2) #show model output
+```
+
+```{r}
+mixed_lm3 <- lmer(log10(mcp_area_80+1) ~ size + log(n_tracking_days) + (1|shark_ID), data = plot_df) #mixed model without sex
+summary(mixed_lm3) #show model output
+```
+
+```{r}
+anova(mixed_lm, mixed_lm2, test = "Chisq") #compare models with size
+```
+
+Shows the model with size is significantly better than the model without size, indicating that size is a significant predictor of MCP. 
+
+```{r}
+anova(mixed_lm, mixed_lm3, test = "Chisq") #compare models with sex
+```
+
+Diagnostic plots
+```{r}
+plot_lmer_diag(mixed_lm, color = "shark_ID") #leverage and cook's distance plots
+```
+
+```{r}
+plot_lmer_rand_diag(mixed_lm, random="shark_ID") #random intercepts and normal Q-Q plots
+```
+
+
+# Binary model
+
+Testing if there is significant difference in the sizes of exploratory v resident sharks:
+
+```{r}
+# make model with size
+binary_glm <- glm(binary_num ~ size_all + log(n_tracking_days) + shark_ID, family = binomial, data = complete_df)
+summary(binary_glm) # show output
+```
+
+```{r}
+#make diagnostic plots
+par(mfrow = c(2, 2))
+glm.diag.plots(binary_glm)
+```
+
+```{r}
+# make model without size
+binary_glm2 <- glm(binary_num ~  log(n_tracking_days) + shark_ID, family = binomial, data = complete_df)
+summary(binary_glm2)
+```
+
+```{r}
+#make diagnostic plots
+par(mfrow = c(2, 2))
+glm.diag.plots(binary_glm2)
+```
+
+```{r}
+# compare models
+anova(binary_glm, binary_glm2, test = "Chisq" )
+```
+

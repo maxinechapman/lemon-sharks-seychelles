@@ -1,0 +1,665 @@
+---
+title: "annual_data"
+author: "Maxine Chapman"
+date: "2023_01_23"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Reads in raw data and creates a new output table with various variables for further analysis.
+
+# Setup
+
+```{r}
+rm(list =ls()) # clear environment
+#get packages
+library(MASS)
+library(r2r)
+library(igraph)
+library(raster)
+library(scales)
+library(sp)
+library(sf)
+library(adehabitatHR)
+#library(rgdal)
+library(lubridate) # date and time
+library(ggplot2)
+library(dplyr)
+```
+
+```{r}
+source("02_data_processing_functions_MC.R")
+```
+
+Read receiver data and set up hashmap for matching receiver ID by lat/lon (to 3 dp) in each shark's data.
+
+```{r}
+#get receiver data
+receiver_data <- read.csv("../data/raw/acoustic_metadata/darros_receiver_details.csv")
+head(receiver_data)
+
+colnames(receiver_data)[which(colnames(receiver_data) == "DSJ.Code")] <- "ReceiverID"
+
+## make lat and lon field with 3 dp 
+receiver_data$Lat <- round(receiver_data$Lat, 3)
+receiver_data$Long <- round(receiver_data$Long, 3)
+receiver_data$Habitat <- as.factor(receiver_data$Habitat) # convert to factor
+receiver_data$Location <- as.factor(receiver_data$Location) # convert to factor
+str(receiver_data)  # check fields and format
+```
+
+```{r}
+#Hashmap to identify receiver ID from lat and long
+ID_hashmap <- r2r::hashmap() 
+
+for(row in 1:nrow(receiver_data)){
+  #row <- 3   #TESTING ONLY
+  ID <- receiver_data[row, "ReceiverID"] 
+  lat <- receiver_data[row, "Lat"]
+  long <- receiver_data[row, "Long"]
+  ID_hashmap[[c(lat, long)]] <- ID
+}
+
+rm(ID, row, lat, long) # delete temporary objects from the loop to keep environment clean
+```
+
+Read in all the individual shark data and combine into one large dataframe.
+
+```{r}
+#get all shark data and combine in df
+shark_files <- file.path("../data/raw/acoustic_data/", list.files("../data/raw/acoustic_data/"))
+df.list <- lapply(shark_files, read.csv, stringsAsFactors=F)
+df <- do.call(rbind, df.list)
+rm(shark_files, df.list)  # remove unneeded objects
+
+## make new lat and long field with 3 dp and remove the old Lat and Long fields
+df$Lat <- round(df$Latitude, 3)
+df$Long <- round(df$Longitude, 3)
+df <- df[ , -which(colnames(df) %in% c("Latitude", "Longitude"))]
+
+#format shark data as needed, i.e. the datetime column as a datetime object
+head(df)
+str(df)
+df$ISO.date <- as.POSIXct(df$ISO.date, tz = "UTC", format = "%Y-%m-%d %H:%M:%OS")
+df$FishID <- as.factor(df$FishID)
+str(df)
+```
+
+Join shark and receiver data:
+
+```{r}
+df <- dplyr::left_join(df, receiver_data)
+str(df)
+```
+
+Read in summary shark data:
+
+```{r}
+summary_sharks <- read.csv("../data/raw/acoustic_metadata/lemon_summary_read.csv")
+str(summary_sharks)
+head(summary_sharks)
+
+#format dates as needed
+summary_sharks$Date.released <- as.POSIXct(summary_sharks$Date.released, tz = "UTC", format = "%d/%m/%Y %H:%M")
+summary_sharks$Last.Detection <- as.POSIXct(summary_sharks$Last.Detection, tz = "UTC", format = "%d/%m/%Y %H:%M")
+                                           
+str(summary_sharks)
+head(summary_sharks)
+```
+
+# Colour coding for igraphs
+
+Create a list which contains the colour that each node should be plotted on the maps (according to habitat type).
+
+```{r}
+#create habitat hashmap
+habitat_hashmap <- r2r::hashmap()  # initialise hashmap
+
+for(row in 1:nrow(receiver_data)){
+  #row <- 1  #TESTING ONLY
+  habitat <- receiver_data[row, "Habitat"]
+  lat <- receiver_data[row, "Lat"]
+  long <- receiver_data[row, "Long"]
+  habitat_hashmap[[c(lat, long)]] <- habitat
+}
+
+rm(row, habitat, lat, long)  # clean environment
+
+#initialise list object to store the colour for each receiver
+vertex.colours = list()
+
+#run through receiver data
+for(receiver in 1:nrow(receiver_data)){
+  #receiver <- 1 # TESTING
+  
+  #get information about receiver
+  lat <- receiver_data[receiver, "Lat"] 
+  long <- receiver_data[receiver, "Long"]
+  habitat_type <- habitat_hashmap[[c(lat, long)]]
+  
+  #colour coding
+  if (habitat_type == "Plateau"){
+    vertex.colours <- append(vertex.colours, "orange")
+  } 
+  else if (habitat_type == "Dropoff"){
+     vertex.colours <- append(vertex.colours, "purple")
+  }
+  else if (habitat_type == "Lagoon") {
+      vertex.colours <- append(vertex.colours, "green")
+  }
+  else if (habitat_type == "Coastal reef"){
+      vertex.colours <- append(vertex.colours, "pink")
+  }
+}
+
+rm(receiver, lat, long, habitat_type)  # clean environment
+
+```
+
+
+# Igraph subset by year
+
+Carry out functions:
+
+```{r}
+data_names_list <- unique(df$FishID)  
+years_list <- c(2012:2022)
+
+for (i_shark in 1:length(data_names_list)) {  
+  #i_shark <- 15  # TESTING ONLY - leave commented out the rest of the time
+  
+  #get shark data
+  shark_ID <- data_names_list[i_shark]
+  shark_file <- df[df$FishID == shark_ID, ]
+  
+  for(i_year in 1:length(years_list)){
+    
+    #i_year <- 10 #TESTING ONLY
+    
+    #subset by year
+    this_year <- years_list[i_year]    
+    start_year <- paste0(this_year, "-01-01")
+    end_year <- paste0(this_year+1, "-01-01")
+    
+    #subset data
+    subset_data <- shark_file[shark_file$ISO.date > start_year & shark_file$ISO.date < end_year, ]
+    
+    #check there is data for year
+    if((nrow(subset_data)) > 1){
+      
+      #carrying out functions
+      shark_matrix <- make_adj_matrix(subset_data, receiver_data, ID_hashmap)
+      make_yearly_igraphs(subset_data, shark_matrix, receiver_data, vertex.colours, this_year, shark_ID)
+    }
+    
+  }
+  
+}
+rm(data_names_list, years_list, i_shark, shark_ID, shark_file, i_year, this_year, start_year, end_year, subset_data, shark_matrix)
+
+```
+
+# Results Table
+
+Create list of island v non island receivers:
+
+```{r}
+island_rec <- list()
+non_island_rec <- list()
+
+#run through reciever data
+for(i_receiver in 1:nrow(receiver_data)){
+  
+  #i_receiver <- 1 #TESTING
+  
+  #get information about receiver
+  lat <- receiver_data[i_receiver, "Lat"]
+  long <- receiver_data[i_receiver, "Long"]
+  
+  #use island long and lat to split receivers into island and non island
+  if((53.28 < long)&&(long < 53.38)&&(-5.46 < lat)&&(lat < -5.39)){ #island receivers
+    island_rec <- append(island_rec, i_receiver)
+  } else{ #non island receivers
+    non_island_rec <- append(non_island_rec, i_receiver)
+  }
+    
+}
+
+rm(i_receiver, lat, long)
+
+```
+
+Create list of inner lagoon v outer lagoon receivers:
+
+```{r}
+in_lagoon_rec <- list()
+out_lagoon_rec <- list()
+
+for(i_receiver in 1:nrow(receiver_data)){
+  
+  #i_receiver <- 73 #TESTING
+  
+  #get information about receiver
+  lat <- receiver_data[i_receiver, "Lat"] 
+  long <- receiver_data[i_receiver, "Long"]
+  habitat_type <- habitat_hashmap[[c(lat, long)]]
+  
+  #sort based on longitude
+  if((53.324 < long)&&(long < 53.346)&&(-5.438 < lat)&&(lat < -5.4175)){ #inner lagoon coordinates
+    in_lagoon_rec <- append(in_lagoon_rec, i_receiver)
+    #print("inner lagoon receiver detected")
+  } else if(habitat_type == "Lagoon"){ #island coordinates
+    out_lagoon_rec <- append(out_lagoon_rec, i_receiver)
+  } 
+  
+}
+
+rm(i_receiver, lat, long)
+```
+
+```{r}
+#create empty results dataframe
+colnames <- c("shark_ID", 
+              "year", 
+              "size_slow",
+              "size_fast",
+              "num_detections", 
+              "num_receivers", 
+              "n_rec_lagoon", 
+              "n_inner_lagoon",
+              "n_outer_lagoon",
+              "n_rec_plat", 
+              "n_rec_drop", 
+              "n_rec_coast",
+              "min_date", 
+              "max_date", 
+              "n_tracking_days", 
+              "tracking_period",
+              "binary_cat",
+              "binary_num",
+              "sex",
+              "sex_num",
+              "maturity_slow",
+              "mcp_area_100", 
+              "mcp_area_95", 
+              "mcp_area_80",
+              "mcp_area_75",
+              "mcp_area_70", 
+              "mcp_area_60")
+results_df <- data.frame(matrix(nrow = 0, ncol = length(colnames)))
+colnames(results_df) <- colnames
+
+head(results_df)
+# head(results_df$shark_ID)
+```
+
+Make results dataframe:
+
+```{r}
+data_names_list <- unique(df$FishID)
+years_list <- c(2012:2021)
+
+for (i_shark in 1:length(data_names_list)) {
+  
+  #i_shark <- 1  # TESTING lizzie
+  
+  #get shark data
+  shark_ID <- data_names_list[i_shark]
+  shark_file <- df[df$FishID == shark_ID, ]
+  
+  #make results dataframe
+  for(i_year in 1:length(years_list)){
+    #i_year <- 6  # TESTING
+    #get dates for 1 year
+    this_year <- years_list[i_year]    
+    start_year <- paste0(this_year, "-01-01")
+    end_year <- paste0(this_year+1, "-01-01")
+    
+    #subset data
+    subset_data <- shark_file[shark_file$ISO.date > start_year & shark_file$ISO.date < end_year, ]
+    
+    #only run code if there is data available for that year
+    if(nrow(subset_data) == 0){
+      next #no data skip to next iteration in loop
+    }
+    
+    shark_number <- subset_data$FishID[1]
+    year <- this_year
+    
+    #calculate possible sizes based on different growth rates
+    shark_size_slow <- calc_shark_size(shark_number, year, growth_rate = 12.5, summary_sharks)
+    shark_size_fast <- calc_shark_size(shark_number, year, growth_rate = 15.5, summary_sharks)
+    
+    #get number of detections
+    num_detections <- nrow(subset_data)
+    
+    #round data so hashmap can use long and lat to get ID
+    subset_data$Lat <- round(subset_data$Lat,3)
+    subset_data$Long <- round(subset_data$Long,3)
+
+    #number of unique receivers used
+    num_receivers <- nrow(unique(data.frame(id = subset_data$FishID, lon =  subset_data$Long, lat = subset_data$Lat)))
+    
+    
+    #mcp areas
+    if(num_receivers > 5){ #calculate if there are more than 5 unique receivers
+      mcp_area <- calc_mcp_area(subset_data, 100) #use function to calculate for different percentages
+      mcp_area_95 <- calc_mcp_area(subset_data, 95)
+      mcp_area_80 <- calc_mcp_area(subset_data, 80)
+      mcp_area_75 <- calc_mcp_area(subset_data, 75)
+      mcp_area_70 <- calc_mcp_area(subset_data, 70)
+      mcp_area_60 <- calc_mcp_area(subset_data, 60)
+      
+    } else {
+      mcp_area <- "NA" #set MCP as NA if there are too few receivers to carry out calculations
+      mcp_area_95 <- "NA"
+      mcp_area_80 <- "NA"
+      mcp_area_75 <- "NA"
+      mcp_area_70 <- "NA"
+      mcp_area_60 <- "NA"
+    }
+    
+    #dates
+    min_date <- min(subset_data$ISO.date)
+    max_date <- max(subset_data$ISO.date)
+    
+    
+    tracking_period <- round(difftime(max_date, min_date, units = "days"), 3)
+    n_tracking_days <- length(unique(lubridate::date(subset_data$ISO.date)))
+    
+    #habitats
+    shark_unique_recs <- unique(data.frame(ReceiverID = subset_data$ReceiverID, Habitat = subset_data$Habitat))
+    
+    n_rec_lagoon <- nrow(subset(shark_unique_recs, Habitat == "Lagoon"))
+    n_rec_plat <- nrow(subset(shark_unique_recs, Habitat == "Plateau"))
+    n_rec_drop <- nrow(subset(shark_unique_recs, Habitat == "Dropoff"))
+    n_rec_coast <- nrow(subset(shark_unique_recs, Habitat == "Coastal Reef"))
+    
+    #binary category - tells us if a shark is an island or non island shark
+    
+    #get list of receivers used
+    receiver_list <- unique(data.frame(id = subset_data$ReceiverID))
+    
+    for(i_receiver in 1:nrow(receiver_list)){
+      #i_receiver <- 14 #TESTING
+      #get receiver ID
+      ID <- receiver_list[i_receiver, ]
+      #check if this is a non island receiver
+        if((ID %in% non_island_rec) == TRUE){
+          binary_cat <- "exploratory"
+          binary_num <- 1
+          #stop loop
+          break
+        } else {
+          binary_cat <- "resident"
+          binary_num <- 0
+        }
+    }
+    
+    in_lagoon <- 0
+    out_lagoon <- 0
+    
+    for(i_receiver in 1:nrow(receiver_list)){
+      #get receiver ID
+      ID <- receiver_list[i_receiver, ]
+      #check location
+      if(ID %in% in_lagoon_rec){
+        in_lagoon <- in_lagoon + 1
+      } else if(ID %in% out_lagoon_rec){
+        out_lagoon <- out_lagoon + 1
+      }
+
+    }
+    
+    #get shark sex from summary document
+    shark_sex <- summary_sharks[summary_sharks$FishID == shark_ID, "Sex"]
+    #shark sex as binary variable 
+    if(shark_sex == "m"){
+      shark_sex_num <- 0
+    } else if((shark_sex == "M")){
+      shark_sex_num <- 0
+      shark_sex <- "m"
+    } else if((shark_sex == "f")){
+      shark_sex_num <- 1
+    } else if((shark_sex == "F")){
+      shark_sex_num <- 1
+      shark_sex <- "f"
+    }  
+    
+    #maturity
+    if (shark_size_slow > 220){
+      maturity_slow <- "mature"
+    } else{
+      maturity_slow <- "juvenile"
+    }
+    
+    #combine data into row
+    new_row <- data.frame("shark_ID" = shark_number,
+                          "year" = year, 
+                          "size_slow" = shark_size_slow,
+                          "size_fast" = shark_size_fast,
+                          "num_detections" = num_detections,
+                          "num_receivers" = num_receivers, 
+                          "n_rec_lagoon" = n_rec_lagoon, 
+                          "n_inner_lagoon" = in_lagoon,
+                          "n_outer_lagoon" = out_lagoon,
+                          "n_rec_plat" = n_rec_plat, 
+                          "n_rec_drop" = n_rec_drop, 
+                          "n_rec_coast" = n_rec_coast,
+                          "min_date" = min_date, 
+                          "max_date" = max_date, 
+                          "n_tracking_days" = n_tracking_days, 
+                          "tracking_period" = tracking_period,
+                          "binary_cat" = binary_cat,
+                          "binary_num" = binary_num,
+                          "sex" = shark_sex,
+                          "sex_num" = shark_sex_num,
+                          "maturity_slow" = maturity_slow,
+                          "mcp_area_100" = mcp_area, 
+                          "mcp_area_95" = mcp_area_95, 
+                          "mcp_area_80" = mcp_area_80, 
+                          "mcp_area_75" = mcp_area_75,
+                          "mcp_area_70" = mcp_area_70, 
+                          "mcp_area_60" = mcp_area_60)
+    
+    
+    if(length(new_row)!= length(colnames)){
+      stop("row is incomplete for shark ", shark_ID,": ", new_row)
+    } else {
+      
+      #add to results df
+      results_df <- rbind(results_df, new_row)
+      
+    }
+  }
+}
+
+rm(data_names_list, i_year, colnames, start_year, this_year, years_list, end_year) #remove loop variables
+
+#remove variables for results table columns
+rm(shark_number, 
+   year, 
+   shark_size_slow, 
+   shark_size_fast,
+   num_detections, 
+   num_receivers, 
+   n_rec_lagoon, 
+   in_lagoon,
+   out_lagoon,
+   n_rec_plat, 
+   n_rec_drop, 
+   n_rec_coast, 
+   min_date, 
+   max_date,
+   tracking_period,
+   n_tracking_days, 
+   binary_cat,
+   binary_num,
+   shark_sex,
+   shark_sex_num,
+   mcp_area, 
+   mcp_area_95, 
+   mcp_area_80,
+   mcp_area_75,
+   mcp_area_70, 
+   mcp_area_60)
+
+head(results_df)
+str(results_df)
+
+write.csv(results_df, "../results/results_dataframe_annual_23042025.csv", row.names = F)
+```
+
+```{r}
+print(results_df)
+
+# df_2 <- read.csv("../results/results_dataframe_annual.csv")
+# identical(results_df, df_2)
+# all.equal(results_df, df_2)
+```
+
+# Summary results 
+
+Summary stats
+```{r}
+# number of sharks
+length(unique(results_df$shark_ID))
+
+# sex
+sex_counts <- table(unique(results_df[, c("shark_ID", "sex")])$sex)
+sex_counts
+
+# total detections
+sum(results_df$num_detections, na.rm = TRUE) #total
+
+# number of tracking days (days with at least 1 detection)
+tracking_days_per_shark <- aggregate(n_tracking_days ~ shark_ID, data = results_df, sum) # Sum tracking days per shark
+mean(tracking_days_per_shark$n_tracking_days)
+max(tracking_days_per_shark$n_tracking_days)
+min(tracking_days_per_shark$n_tracking_days)
+
+
+# tracking duration (days from first to last detection)
+shark_tracking_summary <- results_df %>%
+  group_by(shark_ID) %>%
+  summarise(first_detection = min(min_date),
+            last_detection = max(max_date),
+            total_tracking_period = difftime(last_detection, first_detection, units = "days"))
+mean(shark_tracking_summary$total_tracking_period)
+min(shark_tracking_summary$total_tracking_period)
+max(shark_tracking_summary$total_tracking_period)
+
+# size at release
+release_sizes <- results_df %>%
+  group_by(shark_ID) %>%
+  slice_min(year) %>%  # Get the release year (first year) per shark
+  ungroup() %>%
+  summarise(
+    mean_size = mean(size_slow, na.rm = TRUE),
+    max_size = max(size_slow, na.rm = TRUE),
+    min_size = min(size_slow, na.rm = TRUE)
+  )
+release_sizes
+
+# size classes at release
+release_stages <- results_df %>%
+  group_by(shark_ID) %>%
+  slice_min(year) %>%  # Get only release year
+  ungroup() %>%
+  summarise(
+    adults = sum(size_slow >= 220, na.rm = TRUE),
+    subadults = sum(size_slow >= 130 & size_slow < 220, na.rm = TRUE),
+    juveniles = sum(size_slow <130, na.rm = TRUE)
+  )
+release_stages
+
+# number of subadults to turn adults
+transitions <- results_df %>%
+  group_by(shark_ID) %>%
+  summarise(
+    ever_subadult = any(size_slow < 220 & size_slow > 130, na.rm = TRUE),
+    ever_adult = any(size_slow >= 220, na.rm = TRUE)
+  ) %>%
+  filter(ever_subadult & ever_adult)
+transitions$shark_ID
+
+# rm(sex_counts, shark_tracking_summary,release_sizes, release_stages, transitions )
+```
+
+Location detections
+```{r}
+# receiver IDs in non-island receivers
+non_island_receiver_ids <- receiver_data$ReceiverID[unlist(non_island_rec)]
+
+# filter detection data
+outside_detections <- df[df$ReceiverID %in% non_island_receiver_ids, ]
+
+# non-island receivers per shark
+shark_non_island_receivers <- outside_detections %>%
+  group_by(FishID) %>%
+  summarise(receivers = list(unique(ReceiverID))) %>%
+  ungroup()
+
+receiver_lookup <- receiver_data %>% select(ReceiverID, Location) # include receiver location
+shark_non_island_receivers_named <- shark_non_island_receivers %>%
+  rowwise() %>%
+  mutate(location_names = list(receiver_lookup$Location[match(receivers, receiver_lookup$ReceiverID)])) %>%
+  ungroup()
+
+# specific locations where sharks were detected 
+unique(unlist(shark_non_island_receivers_named$location_names))
+
+# which sharks and when have visited a receiver?
+# Choose the receiver you're interested in
+target_receiver <- 58 
+
+# Filter the main dataset for that receiver
+df_5 <- df %>% 
+  filter(ReceiverID == target_receiver) %>%
+  mutate(year = year(ISO.date)) %>%
+  select(FishID, year) %>%
+  distinct() %>%
+  arrange(year, FishID)
+df_5
+```
+
+General detections figure
+```{r}
+# str(df)
+detection_counts <- df %>%
+  group_by(FishID) %>%
+  summarise(n = n())
+
+ggplot(df, aes(x = ISO.date, y = FishID, colour = Habitat)) +
+  geom_point(alpha = 1, size = 0.2) +
+  geom_text(
+    data = detection_counts,
+    aes(x = max(df$ISO.date)+ 90, y = FishID, label = n), 
+    inherit.aes = FALSE,
+    size = 2,
+    hjust = 0
+  )+
+  scale_color_brewer(palette = "Set1") +
+  labs(
+    x = "Date",
+    y = "Shark ID",
+    colour = "Habitat"
+  ) +
+  xlim(min(df$ISO.date), max(df$ISO.date) + 150) +
+  theme_minimal(base_size=14)+
+  theme(
+    axis.text.y = element_text(size=6),
+    legend.position = "bottom"
+  )
+
+```
+
+```{r}
+ggsave("../results/all_detections.pdf", width = 10, height = 6)
+```
+
