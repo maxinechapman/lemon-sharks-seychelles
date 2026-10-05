@@ -1,0 +1,320 @@
+---
+title: "COAs"
+author: "Giorgos Papageorgiou"
+date: "2026-08-30"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set up and data prep
+```{r}
+rm(list =ls())
+library(tidyverse)
+library(lubridate)
+library(sf)
+```
+
+## Read detections
+```{r}
+df <- read.csv("../data/intermediate/combined_sharks.csv")
+```
+
+## Timestamps
+Observations without a complete timestamp are excluded because COA calculation requires both date and time.
+```{r}
+df <- df %>%
+  mutate(
+    datetime = ymd_hms(ISO.date, tz = "UTC", quiet = TRUE),
+    year = year(datetime))
+
+df <- df %>%
+  filter(!is.na(datetime),
+         year >= 2012,
+         year <= 2021)
+```
+
+## Receiver locations and projections
+```{r}
+# create one row per unique receiver location
+receiver_locs <- df %>%
+  distinct(ReceiverID, Long, Lat)
+
+# number of unique receiver locations
+nrow(receiver_locs)
+
+# check whether any ReceiverID has more than one coordinate pair
+receiver_check <- receiver_locs %>%
+  count(ReceiverID) %>%
+  filter(n > 1)
+stopifnot(nrow(receiver_check) == 0)
+```
+
+Receiver coordinates are projected from WGS84 longitude/latitude into a local LAEA coordinate system. 
+This allows COAs to be calculated from projected X and Y coordinates in metres, rather than directly averaging geographic coordinates in degrees. 
+```{r}
+# convert receiver locations to sf object
+receiver_sf <- st_as_sf(
+  receiver_locs,
+  coords = c("Long", "Lat"),
+  crs = 4326,
+  remove = FALSE)
+
+# project to the same local LAEA CRS used for the MCP analysis
+laea_crs <- "+proj=laea +lat_0=-5.4 +lon_0=53 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+
+receiver_sf <- st_transform(receiver_sf, crs = laea_crs)
+
+# extract projected X and Y coordinates
+xy <- st_coordinates(receiver_sf)
+
+receiver_sf <- receiver_sf %>%
+  mutate(
+    X = xy[, 1],
+    Y = xy[, 2])
+```
+
+Projected receiver coordinates joined back to the main dataset
+```{r}
+# extract projected coordinates without sf geometry
+receiver_xy <- receiver_sf %>%
+  st_drop_geometry() %>%
+  select(ReceiverID, X, Y)
+
+# join projected coordinates onto every detection
+df <- df %>%
+  left_join(receiver_xy, by = "ReceiverID")
+
+# confirm that all detections received projected coordinates
+stopifnot(
+  all(!is.na(df$X)),
+  all(!is.na(df$Y)))
+```
+
+# Choose COA time interval
+Test 30, 60, 90 and 120 min before calculating the final COAs
+```{r}
+intervals <- c(30, 60, 90, 120)
+
+interval_summary <- lapply(intervals, function(int) {
+  
+  tmp <- df %>%
+    mutate(
+      test_bin = as.POSIXct(
+  floor(as.numeric(datetime) / (int * 60)) * (int * 60),
+  origin = "1970-01-01",
+  tz = "UTC")) %>%
+    group_by(FishID, test_bin) %>%
+    summarise(
+      n_receivers = n_distinct(ReceiverID),
+      .groups = "drop")
+  
+  data.frame(
+    interval_min = int,
+    n_bins = nrow(tmp),
+    percent_1_receiver = mean(tmp$n_receivers == 1) * 100,
+    percent_2plus = mean(tmp$n_receivers >= 2) * 100,
+    percent_3plus = mean(tmp$n_receivers >= 3) * 100)
+  }) %>%
+  bind_rows()
+
+interval_summary
+```
+
+## Detection frequency
+```{r}
+interval_detail <- lapply(intervals, function(int) {
+  
+  tmp <- df %>%
+    mutate(
+      test_bin = as.POSIXct(
+        floor(as.numeric(datetime) / (int * 60)) * (int * 60),
+        origin = "1970-01-01",
+        tz = "UTC"
+      )
+    ) %>%
+    group_by(FishID, test_bin) %>%
+    summarise(
+      n_receivers = n_distinct(ReceiverID),
+      n_detections = n(),
+      .groups = "drop"
+    )
+  
+  data.frame(
+    interval_min = int,
+    median_detections = median(tmp$n_detections),
+    mean_detections = mean(tmp$n_detections),
+    median_receivers = median(tmp$n_receivers),
+    percent_2plus = mean(tmp$n_receivers >= 2) * 100
+  )
+  
+}) %>%
+  bind_rows()
+
+interval_detail
+```
+
+## Receiver separation
+```{r}
+calc_bin_span <- function(data, interval_min) {
+  
+  tmp <- data %>%
+    mutate(
+      test_bin = as.POSIXct(
+        floor(as.numeric(datetime) / (interval_min * 60)) *
+          (interval_min * 60),
+        origin = "1970-01-01",
+        tz = "UTC"))
+  
+  tmp %>%
+    group_by(FishID, test_bin) %>%
+    filter(n_distinct(ReceiverID) >= 2) %>%
+    summarise(
+      n_receivers = n_distinct(ReceiverID),
+      max_receiver_distance_m = {
+        coords <- cbind(X, Y)
+        max(as.matrix(dist(unique(coords))))}, .groups = "drop") %>%
+    mutate(interval_min = interval_min)
+}
+```
+
+```{r}
+span_all <- lapply(c(30, 60, 90, 120), function(int) {
+  calc_bin_span(df, int)
+}) %>%
+  bind_rows()
+
+span_summary <- span_all %>%
+  group_by(interval_min) %>%
+  summarise(
+    n_multi_receiver_bins = n(),
+    median_distance_m = median(max_receiver_distance_m),
+    mean_distance_m = mean(max_receiver_distance_m),
+    p95_distance_m = quantile(max_receiver_distance_m, 0.95),
+    max_distance_m = max(max_receiver_distance_m),
+    .groups = "drop")
+
+span_summary
+```
+
+# Calculate final 60-minute COAs
+
+Based on the interval comparison above, a 60-minute interval is selected for the final COA calculation. For each shark and 60-minute interval, detections are counted at each receiver. Receiver coordinates are then weighted by the number of detections at that receiver to calculate the mean projected X and Y position. For Intervals containing detections at only one receiver, the COA corresponds to the location of that receiver.
+
+## Calculation
+```{r}
+# final COA interval
+coa_interval <- 60
+
+# assign detections to 60-minute bins and count detections per receiver
+coa_counts_final <- df %>%
+  mutate(
+    coa_bin = as.POSIXct(
+      floor(as.numeric(datetime) / (coa_interval * 60)) *
+        (coa_interval * 60),
+      origin = "1970-01-01",
+      tz = "UTC")) %>%
+  group_by(FishID, coa_bin, ReceiverID, X, Y) %>%
+  summarise(
+    n_detections = n(),.groups = "drop")
+
+coa <- coa_counts_final %>%
+  group_by(FishID, coa_bin) %>%
+  summarise(
+    coa_X = weighted.mean(X, n_detections),
+    coa_Y = weighted.mean(Y, n_detections),
+    n_receivers = n_distinct(ReceiverID),
+    n_detections = sum(n_detections),
+    .groups = "drop")
+```
+
+## Transform to long/lat 
+
+COAs were transformed back to WGS84 longitude and latitude so that the resulting pseudo-positions could be passed to the tidytracks KDE workflow
+```{r}
+# convert COA coordinates to an sf object in the projected CRS
+coa_sf <- st_as_sf(
+  coa,
+  coords = c("coa_X", "coa_Y"),
+  crs = laea_crs,
+  remove = FALSE)
+
+# transform back to WGS84 longitude/latitude
+coa_sf_wgs84 <- st_transform(coa_sf, crs = 4326)
+
+# extract longitude and latitude
+coa_lonlat <- st_coordinates(coa_sf_wgs84)
+
+coa <- coa %>%
+  mutate(
+    Long = coa_lonlat[, 1], Lat  = coa_lonlat[, 2])
+```
+
+```{r}
+coa_kde <- coa %>%
+  transmute(
+    FishID,
+    ISO.date = format(coa_bin, format = "%Y-%m-%d %H:%M:%S", tz = "UTC"), 
+    Long, Lat, coa_X, coa_Y, n_receivers, n_detections)
+```
+
+## Validate dataset
+```{r}
+# Every original detection should contribute to exactly one COA
+stopifnot(sum(coa$n_detections) == nrow(df))
+
+# Every COA should contain at least one detection and one receiver
+stopifnot(all(coa$n_detections >= 1))
+stopifnot(all(coa$n_receivers >= 1))
+
+# Number of receivers cannot exceed number of detections
+stopifnot(all(coa$n_receivers <= coa$n_detections))
+
+# No missing COA coordinates
+stopifnot(
+  all(!is.na(coa$coa_X)),
+  all(!is.na(coa$coa_Y)),
+  all(!is.na(coa$Long)),
+  all(!is.na(coa$Lat)))
+
+# One COA only per shark per time bin
+stopifnot(
+  coa %>%
+    count(FishID, coa_bin) %>%
+    filter(n > 1) %>%
+    nrow() == 0)
+
+# All sharks in the detection dataset are retained
+stopifnot(
+  setequal(unique(df$FishID), unique(coa$FishID)))
+
+# select one multi-receiver COA for a manual check
+test_bin <- coa %>%
+  dplyr::filter(n_receivers >= 2) %>%
+  dplyr::slice(1)
+
+test_counts <- coa_counts_final %>%
+  filter(
+    FishID == test_bin$FishID,
+    coa_bin == test_bin$coa_bin)
+
+# manually reproduce weighted mean
+manual_X <- weighted.mean(test_counts$X, test_counts$n_detections)
+manual_Y <- weighted.mean(test_counts$Y, test_counts$n_detections)
+
+stopifnot(
+  isTRUE(all.equal(manual_X, test_bin$coa_X)),
+  isTRUE(all.equal(manual_Y, test_bin$coa_Y)))
+```
+
+## Export
+```{r}
+write.csv(
+  coa_kde,
+  "../data/intermediate/combined_sharks_coa.csv",
+  row.names = FALSE)
+```

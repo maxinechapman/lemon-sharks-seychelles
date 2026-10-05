@@ -1,0 +1,656 @@
+---
+title: "2023_01_25_plotting_MC"
+author: "Maxine Chapman"
+date: "2023-01-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Plots based on the annual results dataframe (not raw data directly).
+
+# Setup
+
+```{r}
+rm(list =ls()) #clear environments
+```
+
+
+## packages
+
+```{r}
+library(ggplot2)
+library(ggsignif)
+library(lme4)
+library(performance)
+library(cowplot)
+library(dplyr)
+library(ggsci)
+library(geomtextpath)
+library(forcats)
+library(r2r)
+library(magick)
+library(scales)
+library(rnaturalearth)
+library(raster)
+library(emmeans)
+library(ggspatial)
+library(igraph)
+library(ggnewscale)
+```
+
+## source functions
+
+```{r}
+source("03_data_processing_functions_MC.R") #load code to plot mixed model diagnostic plots
+```
+
+## read in data
+
+```{r}
+#read in results df
+results_df <- read.csv(
+  "../results/results_annual_kde_coa.csv") #full results no filtering
+
+plot_df <- readRDS(
+  "../data/intermediate/annual_space_use_6months_50coa.rds") #filtered by KUD 6 months
+
+seasonal_df <- readRDS(
+  "../results/seasonality/results_monthly_residency.rds") #seasonality df
+```
+
+```{r}
+#read in receiver data
+receiver_data = read.csv("../data/raw/acoustic_metadata/darros_receiver_details.csv")
+#round lat and lon to 3 sf for matching with the shark data
+receiver_data$Lat<-round(receiver_data$Lat,3)
+receiver_data$Long<-round(receiver_data$Long,3)
+
+#rename receiver ID column for clarity
+colnames(receiver_data)[which(colnames(receiver_data) == "DSJ.Code")] <- "ReceiverID"
+
+#head(receiver_data)
+```
+
+
+# Main Figures
+
+```{r}
+#make filepath
+filepath2 <-file.path("..", "results", "figures")
+```
+
+## fig. 1: Receiver maps
+
+```{r}
+# Wide-area bathymetry
+g2_raster <- raster::raster(
+  "../resources/ETOPO_2022_bathy_extract.tiff"
+)
+
+#get coordinates for rasters
+g2_extent <- c(
+  xmin(g2_raster),
+  xmax(g2_raster),
+  ymin(g2_raster),
+  ymax(g2_raster)
+)
+
+#island
+map_small <- terra::rast("../resources/Georeferenced island imagery/satellite/islands11.tif")
+
+#get coordinates
+g3_extent <- c(xmin(map_small),
+               xmax(map_small),
+               ymin(map_small),
+               ymax(map_small))
+```
+
+```{r}
+#create largest map showing position in Indian Ocean
+world <- rnaturalearth::ne_countries(
+  scale = "medium",
+  returnclass = "sf"
+)
+
+g1 <- ggplot() +
+  
+  # World map
+  geom_sf(
+    data = world,
+    fill = "grey85",
+    colour = "grey50",
+    linewidth = 0.2
+  ) +
+  
+  # Box showing the full extent of g2
+  geom_rect(
+    aes(
+      xmin = g2_extent[1],
+      xmax = g2_extent[2],
+      ymin = g2_extent[3],
+      ymax = g2_extent[4]
+    ),
+    fill = NA,
+    colour = "red",
+    linewidth = 0.8
+  ) +
+  
+  # Label for g2 box
+  annotate(
+    "text",
+    x = g2_extent[1],
+    y = g2_extent[4],
+    label = "Amirantes Bank",
+    colour = "red",
+    fontface = "bold",
+    size = 4.5,
+    hjust = 0.4,
+    vjust = -0.5
+  ) +
+  
+  # Africa label
+  annotate(
+    "text",
+     x = 35,
+    y = -5,
+    label = "Africa",
+    colour = "grey40",
+    fontface = "bold",
+    size = 4
+  ) +
+  
+  # Indian Ocean label
+  annotate(
+    "text",
+    x = 70,
+  y = -15,
+    label = "Indian Ocean",
+    colour = "grey40",
+    fontface = "italic",
+    size = 4
+  ) +
+  #surroundings limits
+  coord_sf(
+    xlim = c(20, 85),
+    ylim = c(-30, 20),
+    expand = FALSE
+  ) +
+  theme_void() +
+  theme(
+    panel.border = element_rect(
+      colour = "black",
+      fill = NA,
+      linewidth = 0.7
+    )
+  ) +
+  annotation_scale(text_cex = 1)
+
+g1
+```
+
+```{r}
+#amirantes bank map
+g2_raster2 <- terra::rast(g2_raster)
+
+g2 <- ggplot() +
+  tidyterra::geom_spatraster(aes(fill = ETOPO_2022_bathy_extract), data = g2_raster2) +
+  scale_fill_gradientn(colours = c("#152E47", "#51AEF6"), guide = "none") +
+  ggnewscale::new_scale_fill() +
+  geom_point(data = receiver_data, aes(x = Long, y = Lat, fill = Habitat),
+             shape = 21, size = 2.5, colour = "black", stroke = 0.3) +
+  geom_rect(aes(xmin = g3_extent[1], xmax = g3_extent[2], ymin = g3_extent[3], ymax = g3_extent[4]),
+            fill = NA, colour = "red", linewidth = 0.8) +
+  annotate("text", x = g3_extent[1], y = g3_extent[4], label = "D'Arros and\n St Joseph",
+           colour = "red", fontface = "bold", size = 4.5, hjust = -0.5, vjust = 0.5) +
+  annotation_scale(location = "bl", width_hint = 0.25, text_cex = 1) +
+  scale_fill_manual(values = c("Lagoon" = "green", "Coastal reef" = "pink",
+                               "Plateau" = "orange", "Dropoff" = "purple"),
+                    name = "Habitat Type") +
+  coord_sf(xlim = g2_extent[1:2], ylim = g2_extent[3:4], expand = FALSE) +
+  theme_void() +
+  theme(legend.position = "none")
+```
+
+
+```{r}
+#D'Arros and St Joseph map
+g3 <- ggplot() +
+  tidyterra::geom_spatraster_rgb(data = map_small) +
+  geom_point(data = receiver_data, aes(x = Long, y = Lat, fill = Habitat),
+             shape = 21, size = 5, stroke = 0.5) +
+  annotate("text", x = 53.295, y = -5.405, label = "D'Arros",
+           colour = "red", fontface = "bold", size = 4.5, hjust = 0, vjust = 0) +
+  annotate("text", x = 53.365, y = g3_extent[3] + 0.75 * diff(g3_extent[3:4]),
+         label = "St Joseph", colour = "red", fontface = "bold",
+         size = 4.5, hjust = 1, vjust = 0) +
+  annotate("rect", xmin = g3_extent[1], xmax = g3_extent[1] + 0.025,
+         ymin = g3_extent[3], ymax = g3_extent[3] + 0.004,
+         fill = "white", colour = NA, alpha = 0.9) +
+  annotation_scale(location = "bl", width_hint = 0.25, text_cex = 1) +
+  scale_fill_manual(values = c("Lagoon" = "green", "Coastal reef" = "pink",
+                               "Plateau" = "orange", "Dropoff" = "purple"),
+                    name = "Habitat Type") +
+  coord_sf(xlim = g3_extent[1:2], ylim = g3_extent[3:4], expand = FALSE) +
+  theme_void() +
+  theme(legend.position = "bottom", legend.text = element_text(size = 12))
+```
+
+```{r}
+filename <- "figure_1_receiver_maps.png"
+
+col1 <- cowplot::plot_grid(
+  g1, g2,
+  ncol = 1,
+  labels = c("a", "b"),
+  label_size = 14,
+  rel_heights = c(0.5, 1),
+  rel_widths = c(1, 1), # adjust proportions if needed
+  align = "none"
+)
+
+final <- cowplot::plot_grid(
+  col1, g3,
+  ncol = 2,
+  labels = c("", "c"),
+  label_size = 14,
+  rel_widths = c(1, 2),
+  align = "none"
+)
+
+final
+ggsave(filename, plot = final, path = filepath2, width = 10, height = 8, units = "in", dpi = 300)
+rm(filename)
+```
+
+## fig. 2: Descriptive Plot
+
+```{r}
+#limit unil 2022
+filt_df <- results_df %>% filter(year < 2022)
+
+#make new columns
+included_sharks <- unique(plot_df$shark_ID)
+
+describe_df <- filt_df %>% #includes all sharks
+  dplyr::mutate(log_detections = log10(num_detections)) %>%
+  dplyr::group_by(shark_ID) %>%
+  dplyr::mutate(start_year = min(year)) %>%
+  dplyr::mutate(end_year = max(year)) %>%
+  dplyr::mutate(total_days = sum(n_tracking_days)) %>%
+  dplyr::mutate(included = ifelse(shark_ID %in% included_sharks, "included", "not included")) %>% 
+  arrange(desc(included), shark_ID)
+  #dplyr::mutate(shark_ID = factor(shark_ID, levels = unique(shark_ID)))
+
+describe_df$shark_ID <- factor(describe_df$shark_ID, levels = unique(describe_df$shark_ID))
+
+maturity_df <- describe_df %>%
+  filter(maturity == "mature") %>%
+  group_by(shark_ID) %>%
+  summarize(maturity_year = min(year), .groups = "drop")
+
+# Step 3: Merge maturity year back into main dataframe
+describe_df <- left_join(describe_df, maturity_df, by = "shark_ID")
+
+
+shade_df <- describe_df %>%
+  filter(included == "not included") %>%
+  distinct(shark_ID) %>%
+  mutate(
+    xmin = as.numeric(shark_ID) - 0.5,
+    xmax = as.numeric(shark_ID) + 0.5,
+    ymin = -Inf,   # cover all years
+    ymax = Inf
+  )
+
+my_breaks <- c(1, 10, 100, 1000, 10000, 100000)
+my_breaks_log <- log10(my_breaks)
+```
+
+NB: The plot appears differently (less cramped) in saved files than in R due to different dimensions in save.
+
+```{r}
+plot <- ggplot(describe_df, aes(x = factor(shark_ID), y = year, ymin = year, ymax = year + 1, fill = log_detections)) +
+  geom_crossbar(aes(size = NA), width = 0.6) +  # narrower bars
+  geom_text(label = "Detection days", y = 2024, x = length(unique(describe_df$shark_ID)) + 1, hjust = 0.6) + #label tracking days column
+  coord_flip() +
+  scale_fill_gradient(low = "#999999", high = "#377EB8", name = "Number of detections", breaks = my_breaks_log,     
+  labels = comma(my_breaks)) +
+  scale_y_continuous(breaks = seq(2012, 2022, by = 1), expand = expansion(mult = c(0, 0.15))) +
+  #scale_y_discrete(expand = expansion(add = c(0, 2))) +
+  scale_x_discrete(expand = expansion(add = c(0, 2))) +  #more horizontal space for shark_ID
+  #labs(title = "Shark Tracking Data Visualisation", x = "Shark ID", y = "Year", fill = "log(number of detections)") +
+  labs(x = "Shark ID", y = "Year", fill = "Number of detections)") +
+  #theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  guides(size = FALSE) +
+  geom_text(aes(y = 2024, label = total_days), vjust = 0.5, size = 3.3) +
+  theme_bw() +
+  theme(panel.grid.minor.x = element_blank()) +
+  # theme(panel.grid.major.y = element_line(linewidth = 1, colour = "grey"), 
+  #       axis.text.x = element_text(angle = 45, hjust = 1)) +
+  geom_rect(data = shade_df,
+            aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+            fill = "grey80", alpha = 0.5,
+            inherit.aes = FALSE) + #grey out irrelevant data
+  geom_segment(
+  data = maturity_df,
+  aes(
+    x = shark_ID,
+    xend = shark_ID,
+    y = maturity_year - 0.05,
+    yend = maturity_year + 0.05
+  ),
+  color = "#F8766D",
+  size = 1,
+  inherit.aes = FALSE
+)
+
+plot  
+#saving
+filename <- "figure_2_descriptive.png"
+#filename <- "figure_6_descriptive_fast.png"
+ggsave(filename, path = filepath2)
+```
+
+## fig. 3: residency results
+
+```{r}
+four_group_summary <- seasonal_df %>%
+  group_by(month, sex, maturity_binary) %>%
+  summarise(
+    mean_residency = mean(residency, na.rm = TRUE),
+    se_residency = sd(residency, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    group = interaction(
+      sex,
+      maturity_binary,
+      sep = " - "
+    ),
+    month_factor = factor(
+      month,
+      levels = 1:12,
+      labels = month.abb
+    )
+  )
+
+four_group_plot <- ggplot(four_group_summary,aes(
+    x = month_factor,
+    y = mean_residency,
+    colour = sex,
+    linetype = maturity_binary,
+    group = group
+  )
+) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  geom_errorbar(
+    aes(
+      ymin = pmax(0, mean_residency - se_residency),
+      ymax = pmin(1, mean_residency + se_residency)
+    ),
+    width = 0.15
+  ) +
+  scale_y_continuous(
+    limits = c(0, 1)
+  ) + 
+scale_colour_manual(
+    values = c(
+      "f" = "#F8766D",
+      "m" = "#377EB8"
+    ),
+    name = "Sex"
+  ) +
+  scale_linetype_manual(
+    values = c(
+      "immature" = "dotted",
+      "mature" = "solid"
+    ),
+    name = "Maturity"
+  ) +
+  labs(
+    x = "Month",
+    y = "Mean monthly residency"
+  ) +
+  theme_bw()
+
+four_group_plot
+
+filename <- "figure_3_array_residency_all.png"
+ggsave(filename, path = filepath2, width = 7, height = 5, dpi = 600)
+```
+
+## fig. 4: multipanel model results area v shark size
+
+Models 
+```{r}
+# 50% KUD
+mod_50_fig <- lmer(
+  log_kde_50 ~ size + sex + n_detection_months + (1 | shark_ID),
+  data = mod_df, REML = TRUE)
+
+# 95% KUD
+mod_95_fig <- lmer(
+  log_kde_95 ~ size + sex + n_detection_months + (1 | shark_ID),
+  data = mod_df, REML = TRUE)
+
+# 100% MCP
+mod_mcp_fig <- lmer(
+  log_mcp_100 ~ size + sex + n_detection_months + (1 | shark_ID),
+  data = mod_df, REML = TRUE)
+
+# Custom colour scale
+sex_colours <- c("m" = "#377EB8", "f" = "#F8766D")
+```
+
+Plotting Function
+```{r}
+make_spaceuse_panel <- function(model, data, area_col, y_label) {
+  
+  size_seq <- seq(
+    min(data$size, na.rm = TRUE),
+    max(data$size, na.rm = TRUE),
+    length.out = 100
+  )
+  
+  pred <- emmeans(
+    model,
+    ~ size,
+    at = list(size = size_seq),
+    weights = "proportional"
+  ) %>%
+    confint() %>%
+    as.data.frame() %>%
+    mutate(
+      predicted_km2 = 10^emmean,
+      conf.low_km2  = 10^lower.CL,
+      conf.high_km2 = 10^upper.CL
+    )
+  
+  ggplot(data, aes(x = size, y = .data[[area_col]])) +
+    geom_point(
+      colour = "grey45",
+      alpha = 0.6,
+      size = 1.6
+    ) +
+    geom_ribbon(
+      data = pred,
+      aes(
+        x = size,
+        ymin = conf.low_km2,
+        ymax = conf.high_km2
+      ),
+      inherit.aes = FALSE,
+      fill = "grey70",
+      alpha = 0.35
+    ) +
+    geom_line(
+      data = pred,
+      aes(
+        x = size,
+        y = predicted_km2
+      ),
+      inherit.aes = FALSE,
+      colour = "black",
+      linewidth = 0.9
+    ) +
+    scale_y_log10() +
+    theme_minimal() +
+    theme(
+      panel.grid.minor = element_blank()
+    ) +
+    labs(
+      x = "Shark size (cm)",
+      y = y_label
+    )
+}
+```
+
+Panels
+```{r}
+kde_50 <- make_spaceuse_panel(
+  mod_50_fig,
+  mod_df,
+  "kde_area_50",
+  expression("50% KUD area (km"^2*")")
+)
+
+kde_95 <- make_spaceuse_panel(
+  mod_95_fig,
+  mod_df,
+  "kde_area_95",
+  expression("95% KUD area (km"^2*")")
+)
+
+mcp_100 <- make_spaceuse_panel(
+  mod_mcp_fig,
+  mod_df,
+  "mcp_area_100",
+  expression("100% MCP area (km"^2*")")
+)
+```
+
+Assemble final plot
+```{r}
+library(cowplot)
+
+# remove repeated x-axis titles from top row
+kde_50_top <- kde_50 + labs(x = NULL)
+kde_95_top <- kde_95 + labs(x = NULL)
+
+# Top row
+top_row <- plot_grid(
+  kde_50_top,
+  kde_95_top,
+  labels = c("a", "b"),
+  ncol = 2,
+  align = "hv"
+)
+
+# Bottom panel centred, same width as either top panel
+bottom_row <- plot_grid(
+  NULL,
+  plot_grid(
+    mcp_100,
+    labels = "c"
+  ),
+  NULL,
+  ncol = 3,
+  rel_widths = c(0.5, 1, 0.5)
+)
+
+# Final figure
+figure_4 <- plot_grid(
+  top_row,
+  bottom_row,
+  ncol = 1,
+  rel_heights = c(1, 1)
+)
+
+figure_4
+
+filename <- "figure_4_multipanel_models.png"
+ggsave(filename, path = filepath2, width = 6.85, height = 7.5, dpi = 600)
+rm(filename, top_row, bottom_row, kde_50, kde_95, mcp_100)
+```
+
+
+# Supplementary Figures
+
+## Example KUDs and MCPs
+
+NB: Need to run figure 1 section first.
+```{r}
+#read in data
+all_sharks <- readRDS("../data/intermediate/coa_spatial_analysis.rds") #read in all sharks
+
+selected_shark <-  59
+
+df <- all_sharks %>% dplyr::filter(FishID %in% selected_shark)
+unique(df$year)
+
+# select_years <- c("2013", "2016", "2019") #55
+select_years <- c("2014", "2018", "2021") #59
+# select_years <- c("2014", "2015", "2016") #144
+# select_years <- c("2016", "2018", "2020") #364
+```
+
+```{r}
+#convert to correct projection
+sharks_tt <- tt_read_data(
+  events = df,
+  col_track_id = "FishID",
+  col_coords = c("Long", "Lat"),
+  col_date_time = "ISO.date",
+  time_zone = "UTC",
+  format_date_time = "%Y-%m-%d %H:%M:%OS",
+  crs = 4326)
+
+#calculate kde
+sharks_kde <- sharks_tt %>%
+  group_by(FishID, year) %>%
+  hr_kde(levels = c(0.5, 0.95))
+
+#calculate mcp
+sharks_mcp <- sharks_tt %>%
+  group_by(FishID, year) %>%
+  hr_mcp(levels = c(1.00))
+```
+
+```{r}
+#make plotting df
+kde_plot <- sharks_kde %>%
+  mutate(HR = case_when(level == 0.95 ~ "KUD95", level == 0.50 ~ "KUD50"))
+
+mcp_plot <- sharks_mcp %>%
+  mutate(HR = "MCP100") 
+
+#combine dfs
+hr_plot <- bind_rows(kde_plot, mcp_plot) %>%
+  mutate(HR = factor(HR, levels = c("KUD95", "KUD50", "MCP100")),
+    Year = factor(sub(".*_", "", group_id), select_years)) %>% 
+  filter(!is.na(Year))
+```
+
+
+```{r}
+#plotting
+s1 <- ggplot() +
+  tidyterra::geom_spatraster_rgb(data = map_small) +
+  geom_sf(data = hr_plot, aes(fill = HR), alpha = 0.5, colour = "black") + 
+  facet_grid(HR ~ Year) +
+  coord_sf(xlim = g3_extent[1:2], ylim = g3_extent[3:4], expand = FALSE) +
+  theme_void() +
+  labs(fill = "Space Use\nMetric")
+
+s1
+
+filename <- paste0("supplementary_polygons_", selected_shark, ".png")
+ggsave(filename, plot = s1, path = filepath2)
+
+rm(filename)
+```
+

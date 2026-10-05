@@ -1,0 +1,220 @@
+---
+title: "Annual space-use filtering"
+author: "Giorgos Papageorgiou"
+date: "2026-09-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+```{r}
+rm(list =ls())
+library(tidyverse)
+```
+
+# Filtering
+
+The annual KDE modelling dataset is filtered using explicit technical and temporal criteria before any models are fitted. The same criteria are applied to all shark-years
+```{r}
+# Main annual dataset: COA-based KDEs
+complete_df <- read.csv("../results/results_annual_kde_coa.csv",
+                        stringsAsFactors = FALSE)
+
+complete_df <- complete_df %>%
+  mutate(
+    min_date = as.Date(min_date),
+    max_date = as.Date(max_date),
+    year = as.integer(year),
+    sex = tolower(sex))
+```
+
+## Criteria
+```{r}
+min_detection_months <- 6
+min_coa_positions <- 50
+```
+
+## Apply criteria
+```{r}
+complete_df <- complete_df %>%
+  mutate(
+
+    # Common filtering criteria
+    pass_months =
+      n_detection_months >= min_detection_months,
+
+    pass_coa_positions =
+      n_kde_positions >= min_coa_positions,
+
+    # Validity of spatial estimates
+    pass_kde_50 =
+      !is.na(kde_area_50) &
+      kde_area_50 > 0,
+
+    pass_kde_95 =
+      !is.na(kde_area_95) &
+      kde_area_95 > 0,
+
+    pass_mcp100 =
+      !is.na(mcp_area_100) &
+      mcp_area_100 > 0,
+
+    # Common eligibility for all spatial analyses
+    use_spatial_analysis =
+      pass_months &
+      pass_coa_positions &
+      pass_kde_50 &
+      pass_kde_95 &
+      pass_mcp100,
+
+    # Metric-specific usable samples
+    use_kde =
+      use_spatial_analysis &
+      pass_kde_50 &
+      pass_kde_95,
+
+    use_mcp100 =
+      use_spatial_analysis &
+      pass_mcp100)
+```
+
+## Checks
+```{r}
+filter_audit <- tibble(
+  stage = c(
+    "All shark-years",
+    ">=6 detection months",
+    ">=6 months + >=50 COAs",
+    "Valid KDE sample",
+    "Valid MCP100 sample",
+    "Usable for at least one spatial metric"),
+
+  n_shark_years = c(
+    nrow(complete_df),
+
+    sum(complete_df$pass_months),
+
+    sum(complete_df$use_spatial_analysis),
+
+    sum(complete_df$use_kde),
+
+    sum(complete_df$use_mcp100),
+
+    sum(
+      complete_df$use_spatial_analysis &
+      (complete_df$use_kde | complete_df$use_mcp100)
+    )),
+
+  n_sharks = c(
+    n_distinct(complete_df$shark_ID),
+
+    n_distinct(
+      complete_df$shark_ID[
+        complete_df$pass_months
+      ]),
+
+    n_distinct(
+      complete_df$shark_ID[
+        complete_df$use_spatial_analysis
+      ]),
+
+    n_distinct(
+      complete_df$shark_ID[
+        complete_df$use_kde
+      ]),
+
+    n_distinct(
+      complete_df$shark_ID[
+        complete_df$use_mcp100
+      ]),
+
+    n_distinct(
+      complete_df$shark_ID[
+        complete_df$use_spatial_analysis &
+        (complete_df$use_kde | complete_df$use_mcp100)
+      ]
+    )
+  )
+)
+
+filter_audit
+```
+
+# Export 
+## Dataset for modelling and figures
+```{r}
+annual_spatial_df <- complete_df %>%
+  filter(use_spatial_analysis) %>%
+  dplyr::select(
+    shark_ID,
+    year,
+
+    size,
+    sex,
+    maturity,
+
+    n_detection_months,
+    n_tracking_days,
+    n_kde_positions,
+    num_detections,
+    num_receivers,
+
+    kde_area_50,
+    kde_area_95,
+    mcp_area_100)
+
+stopifnot(
+  all(annual_spatial_df$n_detection_months >= 6),
+  all(annual_spatial_df$n_kde_positions >= 50))
+
+saveRDS(
+  annual_spatial_df,
+  "../data/intermediate/annual_space_use_6months_50coa.rds")
+```
+
+```{r}
+stopifnot(
+  all(annual_spatial_df$n_detection_months >= 6),
+  all(annual_spatial_df$n_kde_positions >= 50)
+)
+```
+
+## Datasets for maps and polygons
+
+Retains all COA positions belonging to shark-years included in the final
+annual spatial-analysis dataset.
+```{r}
+# COA dataset - used for inspection of filters
+raw_df <- read.csv("../data/intermediate/combined_sharks_coa.csv")
+
+coa_analysis <- raw_df %>%
+  mutate(
+    date = as.Date(ISO.date),
+    year = lubridate::year(date)
+  ) %>%
+  inner_join(
+    complete_df %>%
+      filter(use_spatial_analysis) %>%
+      dplyr::select(
+        shark_ID,
+        year,
+        sex,
+        size,
+        maturity,
+        kde_area_50,
+        kde_area_95,
+        mcp_area_100
+      ),
+    by = c(
+      "FishID" = "shark_ID",
+      "year"
+    )
+  )
+
+saveRDS(
+  coa_analysis,
+  "../data/intermediate/coa_spatial_analysis.rds")
+```

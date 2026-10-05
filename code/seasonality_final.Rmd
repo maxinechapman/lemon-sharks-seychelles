@@ -1,0 +1,459 @@
+---
+title: "Monthly residency and seasonality"
+author: "Maxine Chapman"
+date: "2026-08-14"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+```{r}
+rm(list =ls())
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(ggsci)
+library(stringr)
+library(glmmTMB)
+library(DHARMa)
+library(marginaleffects)
+```
+
+```{r}
+df <- read.csv("../data/intermediate/combined_sharks.csv") # read in all sharks, raw data, not COA
+df <- df %>%
+  mutate(
+    datetime = lubridate::parse_date_time(
+      ISO.date,
+      orders = c("ymd HMS", "ymd HM", "ymd"),
+      tz = "UTC"),
+    date = as.Date(datetime),
+    year = lubridate::year(datetime),
+    month = lubridate::month(datetime))
+
+stopifnot(!any(is.na(df$datetime)))
+```
+
+Atoll bounds
+```{r}
+# Atoll receiver bounds
+atoll_lon_min <- 53.312212
+atoll_lon_max <- 53.38
+atoll_lat_min <- -5.46
+atoll_lat_max <- -5.39
+
+# Restrict detections to receivers within the atoll
+residency_df <- df %>%
+  filter(
+    Long > atoll_lon_min,
+    Long < atoll_lon_max,
+    Lat > atoll_lat_min,
+    Lat < atoll_lat_max)
+```
+
+Metadata
+```{r}
+#add in shark metadata
+summary_sharks <- read.csv("../data/raw/acoustic_metadata/lemon_summary_read_updated.csv")
+
+# standardise sex labels
+summary_sharks <- summary_sharks %>%
+  mutate(Sex = str_trim(Sex) %>% str_to_lower(),
+         Sex = factor(Sex, levels = c("f", "m")))
+
+# shark-level tracking metadata
+shark_metadata <- readRDS(
+  "../results/metadata/shark_metadata_full.rds")
+```
+
+```{r}
+source("03_data_processing_functions_MC.R")
+```
+
+# Monthly atoll residency
+
+## Calculate monthly residency
+```{r}
+data_names_list <- unique(df$FishID) # Sharks included in the detection dataset
+years_list <- c(2012:2021) # study years
+months_list <- 1:12 # Calendar months
+
+# Standardise metadata variables
+shark_metadata <- shark_metadata %>%
+  mutate(
+    tagging_date = as.Date(tagging_date),
+    final_date   = as.Date(final_date),
+    sex = str_to_lower(str_trim(sex)))
+
+results_list <- list()
+row_counter <- 1
+
+for (i_shark in seq_along(data_names_list)) { # Loop through each tagged shark
+
+  shark_ID <- data_names_list[i_shark] #get shark data
+  shark_file <- residency_df %>% # Atoll detections for this shark
+    filter(FishID == shark_ID)
+  
+  shark_meta <- shark_metadata %>% # Retrieve this shark's metadata
+    filter(shark_ID == !!shark_ID)
+  
+  if (nrow(shark_meta) != 1) {
+    stop("Metadata problem for shark ", shark_ID)} # Each shark should have exactly one row in the metadata table
+  
+  # Observed tracking period
+  tagging_date <- shark_meta$tagging_date 
+  final_date <- shark_meta$final_date
+
+  # Sex
+  shark_sex <- shark_meta$sex
+  
+  # Restrict the overall study years to years during which
+  # this shark was within its observed tracking period
+  shark_years <- years_list[
+    years_list >= lubridate::year(tagging_date) &
+    years_list <= lubridate::year(final_date)]
+  
+  for(i_year in shark_years) { # Loop through relevant years for this shark
+
+    # calculate shark size using function
+    shark_size <- calc_shark_size(shark_ID, i_year, summary_sharks)
+    
+    # Life stage based on estimated PCL
+    maturity <- case_when(
+      shark_size >= 166   ~ "mature",
+      TRUE                ~ "immature")
+    
+    for(i_month in months_list){ # Loop through all 12 calendar months
+      
+      month_start <- as.Date(
+        sprintf("%04d-%02d-01",i_year,i_month))
+      
+      month_end <- ceiling_date(
+        month_start, unit = "month") - days(1)
+
+      month_length <- days_in_month(month_start)
+      
+      # Skip months outside the observed tracking period
+      if (month_end < tagging_date ||
+          month_start > final_date) {
+        next}
+      
+      # Use only complete months within the observed tracking period
+      if (month_start <= tagging_date || month_end >= final_date) {
+        next}
+      
+      subset_data <- shark_file %>% 
+        filter(date >= month_start, date <= month_end)
+
+      n_tracking_days <- n_distinct(subset_data$date)
+      monthly_residency <- n_tracking_days / month_length
+      
+      # Save this shark-month
+      results_list[[row_counter]] <- data.frame(
+
+        shark_ID = shark_ID,
+        year = i_year,
+        month = i_month,
+
+        month_start = month_start,
+        month_end = month_end,
+        n_tracking_days = n_tracking_days,
+        month_length = month_length,
+        residency = monthly_residency,
+        size = shark_size,
+        maturity = maturity,
+        sex = shark_sex)
+      
+      # Move to next output row
+      row_counter <- row_counter + 1
+    }
+  }
+}
+# Combine all shark-month records into one dataframe
+results_df <- bind_rows(results_list)
+```
+
+# Seasonality models
+```{r}
+seasonal_df <- results_df %>%
+  mutate(
+    n_not_detected = month_length - n_tracking_days, # days without detections
+    month_angle = 2 * pi * (month - 1) / 12, # Cyclic representation of month
+    sin_month = sin(month_angle),
+    cos_month = cos(month_angle),
+    sex = factor(sex, levels = c("f", "m")),     # Standardise sex
+    maturity = factor(maturity, levels = c("immature", "mature")))
+```
+
+Save monthly residency data
+```{r}
+seasonality_dir <- file.path("..", "results/seasonality")
+figures_dir <- file.path("..", "results/figures")
+
+dir.create(seasonality_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(figures_dir, showWarnings = FALSE, recursive = TRUE)
+
+saveRDS(
+  seasonal_df,
+  file.path(seasonality_dir, "results_monthly_residency.rds"))
+write.csv(
+  seasonal_df,
+  file.path(seasonality_dir, "results_monthly_residency.csv"),
+  row.names = FALSE)
+```
+
+## Three-way interaction model
+```{r}
+m_3way <- glmmTMB(
+  cbind(
+    n_tracking_days,
+    n_not_detected) ~
+    (sin_month + cos_month) * sex * maturity # Seasonality × sex × maturity
+    + (1 | shark_ID), 
+
+  family = betabinomial(link = "logit"),
+  data = seasonal_df)
+
+summary(m_3way)
+```
+
+## Two-way interaction model
+```{r}
+m_2way <- glmmTMB(
+  cbind(
+    n_tracking_days,
+    n_not_detected) ~
+    sin_month + cos_month + sex + maturity +
+    sin_month:sex +
+    cos_month:sex +
+    sin_month:maturity +
+    cos_month:maturity +
+    sex:maturity +
+    (1 | shark_ID),
+  family = betabinomial(link = "logit"),
+  data = seasonal_df)
+
+anova(m_2way, m_3way) # Compare two-way and three-way interaction structures
+AIC(m_2way, m_3way)
+```
+
+## Overall seasonality 
+```{r}
+# Reduced model with no seasonal terms
+m_no_season <- glmmTMB(
+  cbind(
+    n_tracking_days,
+    n_not_detected) ~
+    sex * maturity +
+    (1 | shark_ID),
+  family = betabinomial(link = "logit"),
+  data = seasonal_df)
+
+# Is there evidence of seasonality overall?
+lrt_season <- anova(
+  m_no_season,
+  m_2way)
+
+lrt_season
+```
+
+## Seasonality x sex
+Does seasonality differ between males and females?
+```{r}
+m_no_season_sex <- glmmTMB(
+  cbind(
+    n_tracking_days,
+    n_not_detected) ~
+    sin_month +
+    cos_month +
+    sex +
+    maturity +
+    sin_month:maturity +
+    cos_month:maturity +
+    sex:maturity +
+    (1 | shark_ID),
+  family = betabinomial(link = "logit"),
+  data = seasonal_df)
+
+lrt_season_sex <- anova(
+  m_no_season_sex,
+  m_2way)
+
+lrt_season_sex
+```
+
+## Seasonality x maturity
+Does seasonality differ between mature and immature sharks?
+```{r}
+m_no_season_maturity <- glmmTMB(
+  cbind(
+    n_tracking_days,
+    n_not_detected) ~
+    sin_month + cos_month + sex + maturity +
+    sin_month:sex +
+    cos_month:sex +
+    sex:maturity +
+    (1 | shark_ID),
+  family = betabinomial(link = "logit"),
+  data = seasonal_df)
+
+lrt_season_maturity <- anova(
+  m_no_season_maturity,
+  m_2way)
+
+lrt_season_maturity
+```
+
+## Sex x maturity
+Does the relationship between maturity and residency differ by sex?
+```{r}
+m_no_sex_maturity <- glmmTMB(
+  cbind(
+    n_tracking_days,
+    n_not_detected) ~
+    sin_month + cos_month + sex + maturity +
+    sin_month:sex +
+    cos_month:sex +
+    sin_month:maturity +
+    cos_month:maturity +
+    (1 | shark_ID),
+  family = betabinomial(link = "logit"),
+  data = seasonal_df)
+
+lrt_sex_maturity <- anova(
+  m_no_sex_maturity,
+  m_2way)
+
+lrt_sex_maturity
+```
+
+## Diagnostics
+```{r}
+res_final <- simulateResiduals(m_2way, n = 2000)
+plot(res_final)
+testDispersion(res_final)
+testUniformity(res_final)
+testOutliers(res_final)
+```
+
+# Descriptive summaries
+```{r}
+# Monthly residency
+raw_months <- seasonal_df %>%
+  group_by(month) %>%
+  summarise(
+    mean_residency = mean(residency, na.rm = TRUE),
+    sd = sd(residency, na.rm = TRUE),
+    n = sum(!is.na(residency)),
+    se = sd / sqrt(n),
+    .groups = "drop"
+  ) %>%
+  mutate(month_name = month.abb[month])
+
+raw_months
+```
+
+```{r}
+# Residency by sex and maturity
+raw_groups <- seasonal_df %>%
+  group_by(sex, maturity) %>%
+  summarise(
+    mean_residency = mean(residency, na.rm = TRUE),
+    sd = sd(residency, na.rm = TRUE),
+    n = sum(!is.na(residency)),
+    se = sd / sqrt(n),
+    .groups = "drop")
+
+raw_groups
+```
+
+```{r}
+# Monthly range by sex and maturity
+raw_group_months <- seasonal_df %>%
+  group_by(month, sex, maturity) %>%
+  summarise(
+    mean_residency = mean(residency, na.rm = TRUE),
+    .groups = "drop")
+
+raw_group_ranges <- raw_group_months %>%
+  group_by(sex, maturity) %>%
+  summarise(
+    minimum_monthly_mean = min(mean_residency, na.rm = TRUE),
+    maximum_monthly_mean = max(mean_residency, na.rm = TRUE),
+    .groups = "drop")
+
+raw_group_ranges
+```
+
+# Model predictions
+Monthly residency
+```{r}
+# Prediction grid:
+# each sex × maturity group evaluated at each of the 12 months
+month_grid <- expand_grid(
+  month = 1:12,
+  sex = levels(seasonal_df$sex),
+  maturity = levels(seasonal_df$maturity)) %>%
+  mutate(
+    sin_month = sin(2 * pi * (month - 1) / 12),
+    cos_month = cos(2 * pi * (month - 1) / 12),
+
+    # Required because shark_ID occurs in the model.
+    # Random effects are excluded below with re.form = NA.
+    shark_ID = seasonal_df$shark_ID[1])
+
+group_means <- avg_predictions(
+  m_2way,
+  newdata = month_grid,
+  by = c("sex", "maturity"),
+  type = "response",
+  re.form = NA)
+
+group_means
+```
+
+Overall monthly predictions
+```{r}
+season_months <- avg_predictions(
+  m_2way,
+  newdata = month_grid,
+  by = "month",
+  type = "response",
+  re.form = NA)
+
+season_months %>%
+  as.data.frame() %>%
+  mutate(month_name = month.abb[month]) %>%
+  arrange(desc(estimate)) %>%
+  dplyr::select(month, month_name, estimate, conf.low, conf.high)
+```
+
+Female vs male within each maturity class
+```{r}
+sex_contrasts <- avg_comparisons(
+  m_2way,
+  variables = "sex",
+  by = "maturity",
+  newdata = month_grid,
+  type = "response",
+  re.form = NA)
+
+sex_contrasts
+```
+
+Immature vs mature within each sex
+```{r}
+maturity_contrasts <- avg_comparisons(
+  m_2way,
+  variables = "maturity",
+  by = "sex",
+  newdata = month_grid,
+  type = "response",
+  re.form = NA)
+
+maturity_contrasts
+```

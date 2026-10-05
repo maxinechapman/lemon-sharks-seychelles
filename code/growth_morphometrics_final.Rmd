@@ -1,0 +1,229 @@
+---
+title: "Growth and morphometrics"
+author: "Georgios Papageorgiou"
+date: "2026-08-30"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+```
+
+# Growth and morphometrics
+
+This analysis evaluates the body length measurements and growth assumptions used to estimate annual shark size. Specifically, it
+
+1. examines the relationship between TL and PCL in the sharks of this study;
+2. derives a TL–PCL conversion for comparison with published measurements reported in TL;
+3. evaluates the Brown and Gruber (1988) Negaprion brevirostris growth curve against juvenile N. acutidens growth reported by Stevens (1984);
+4. converts the published 220 cm TL maturity threshold to PCL.
+
+# Setup
+```{r}
+library(tidyverse)
+library(lubridate)
+```
+
+```{r}
+capture_df <- read.csv(
+  "../data/raw/acoustic_metadata/lemon_summary_read_updated.csv")
+
+morph_df <- capture_df %>%
+  transmute(
+    FishID,
+    species = Species,
+    sex = tolower(Sex),
+    pcl = as.numeric(pcl),
+    fl = as.numeric(fl),
+    tl = as.numeric(tl),
+    tagging_date = dmy_hm(Date.released))
+```
+
+```{r}
+# check the dataset, how many pcl - tl pairs we have and max-min values
+morph_df %>%
+  summarise(
+    n_sharks = n(),
+    n_paired_TL_PCL = sum(!is.na(tl) & !is.na(pcl)),
+    min_TL = min(tl, na.rm = TRUE),
+    max_TL = max(tl, na.rm = TRUE),
+    min_PCL = min(pcl, na.rm = TRUE),
+    max_PCL = max(pcl, na.rm = TRUE))
+
+# check for duplicates
+morph_df %>%
+  count(FishID) %>%
+  filter(n > 1)
+```
+
+# TL–PCL relationship
+Restrict the morphometric analysis to sharks for which both measurements are available.
+```{r}
+tl_pcl <- morph_df %>%
+  filter(
+    !is.na(tl),
+    !is.na(pcl))
+```
+
+## Linear Model
+```{r}
+tl_pcl_model <- lm(
+  pcl ~ tl,
+  data = tl_pcl)
+
+summary(tl_pcl_model)
+confint(tl_pcl_model)
+```
+
+```{r}
+tl_pcl_intercept <- coef(tl_pcl_model)[1]
+tl_pcl_slope <- coef(tl_pcl_model)[2]
+
+tl_pcl_intercept
+tl_pcl_slope
+```
+
+## Plot
+Supplementary figure: TL-PCL relationship
+```{r}
+r2 <- summary(tl_pcl_model)$r.squared
+n_pairs <- nrow(tl_pcl)
+
+fig_tl_pcl <- ggplot(tl_pcl, aes(x = tl, y = pcl)) +
+  geom_point(size = 2) +
+  geom_smooth(
+    method = "lm",
+    se = TRUE) +
+  annotate(
+    "text",
+    x = Inf,
+    y = -Inf,
+    hjust = 1.1,
+    vjust = -0.8,
+    label = paste0(
+      "PCL = ", round(tl_pcl_slope, 3),
+      " TL + ", round(tl_pcl_intercept, 3),
+      "\nR² = ", round(r2, 3),
+      ", n = ", 43)
+  ) +
+  labs(
+    x = "Total length (cm)",
+    y = "Precaudal length (cm)"
+  ) +
+  theme_bw()
+
+fig_tl_pcl
+
+ggsave(
+    "../results/growth/figure_S_TL_PCL.png",
+    fig_tl_pcl,
+    width = 6,
+    height = 5,
+    dpi = 300)
+```
+
+## Model diagnostics
+```{r}
+par(mfrow = c(2, 2))
+plot(tl_pcl_model)
+par(mfrow = c(1, 1))
+```
+
+Test for curvature
+```{r}
+tl_pcl_quadratic <- lm(
+  pcl ~ tl + I(tl^2),
+  data = tl_pcl)
+
+anova(tl_pcl_model, tl_pcl_quadratic)
+
+AIC(tl_pcl_model, tl_pcl_quadratic)
+```
+
+Conversion functions
+```{r}
+TL_to_PCL <- function(TL_cm) {
+  predict(
+    tl_pcl_model,
+    newdata = data.frame(tl = TL_cm)
+  )
+}
+
+PCL_to_TL <- function(PCL_cm) {
+  (PCL_cm - tl_pcl_intercept) / tl_pcl_slope
+}
+```
+
+# Candidate Brown & Gruber growth model
+```{r}
+Linf_brown <- 317.65
+k_brown <- 0.057
+
+fabens_size <- function(
+  initial_size,
+  years,
+  Linf = Linf_brown,
+  k = k_brown
+) {
+  
+  Linf - (Linf - initial_size) * exp(-k * years)
+}
+```
+
+# Validate against Stevens (1984)
+
+Stevens' short-term growth dataset contained 16 immature N. acutidens measuring 74.5–121.2 cm TL at release. Their mean growth rate was approximately 10.4 mm/month, or 12.5 cm/year TL.
+
+Two longer-term recaptures were:
+- 127 cm TL at tagging, growing approximately 15.4 cm/year
+- 136 cm TL at tagging, growing approximately 15.6 cm/year
+
+Because Stevens reports TL whereas Brown and Gruber parameterised growth using PCL, the local TL–PCL relationship is used to put both sources on a common scale.
+
+```{r}
+# Stevens long-term recaptures
+stevens_longterm <- tibble(
+  start_TL = c(127, 136),
+  observed_growth_TL = c(15.4, 15.6)
+) %>%
+  mutate(
+    start_PCL = as.numeric(TL_to_PCL(start_TL)),
+    
+    end_PCL = fabens_size(
+      initial_size = start_PCL,
+      years = 1
+    ),
+    
+    end_TL = PCL_to_TL(end_PCL),
+    
+    predicted_growth_TL = end_TL - start_TL,
+    
+    difference = predicted_growth_TL - observed_growth_TL
+  )
+
+stevens_longterm
+```
+
+# Convert maturity threshold from TL to PCL
+
+Stevens reported sexual maturity at approximately 220 cm TL. 
+Use the locally fitted morphometric relationship to estimate the corresponding PCL:
+```{r}
+maturity_TL <- 220
+
+maturity_PCL_prediction <- predict(
+  tl_pcl_model,
+  newdata = data.frame(
+    tl = maturity_TL
+  ),
+  interval = "confidence")
+
+maturity_PCL_prediction
+
+maturity_PCL <- as.numeric(
+  maturity_PCL_prediction[1, "fit"])
+
+maturity_PCL
+```

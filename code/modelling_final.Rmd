@@ -1,0 +1,575 @@
+---
+title: "Annual space use modelling"
+author: "Giorgos Papageorgiou"
+date: "2026-09-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+```{r}
+rm(list =ls()) # clear environment
+library(lme4)
+library(tidyverse)
+library(writexl)
+
+source("plot_lmer_diag_loess.R") #load code to plot mixed model diagnostic plots
+```
+
+# Datasets
+```{r}
+mod_df <- readRDS(
+  "../data/intermediate/annual_space_use_6months_50coa.rds")
+
+coa_df <- readRDS(
+  "../data/intermediate/coa_spatial_analysis.rds")
+
+tables_dir <- "../results/tables"
+
+dir.create(
+  tables_dir,
+  recursive = TRUE,
+  showWarnings = FALSE)
+```
+
+```{r}
+mod_df <- mod_df %>%
+  mutate(
+    shark_ID = factor(shark_ID),
+    sex = factor(tolower(as.character(sex))),
+    life_stage = factor(maturity),
+    log_kud_50 = log10(kde_area_50),
+    log_kud_95 = log10(kde_area_95),
+    log_mcp_100 = log10(mcp_area_100))
+```
+
+# KUD models
+
+Full models
+```{r}
+# 50% KUD - core area
+mod_50 <- lmer(
+  log_kud_50 ~ size + sex + n_detection_months + (1 | shark_ID),
+  data = mod_df, REML = FALSE)
+
+summary(mod_50)
+
+# 95% KUD - home range
+mod_95 <- lmer(
+  log_kud_95 ~ size + sex + n_detection_months + (1 | shark_ID),
+  data = mod_df, REML = FALSE)
+
+summary(mod_95)
+```
+
+anova() tests
+```{r}
+# 50% KUD
+mod_50_no_size <- update(mod_50, . ~ . - size)
+mod_50_no_sex  <- update(mod_50, . ~ . - sex)
+mod_50_no_months <- update(mod_50, . ~ . - n_detection_months)
+
+anova(mod_50, mod_50_no_size)
+anova(mod_50, mod_50_no_sex)
+anova(mod_50, mod_50_no_months)
+
+# 95% KUD
+mod_95_no_size <- update(mod_95, . ~ . - size)
+mod_95_no_sex  <- update(mod_95, . ~ . - sex)
+mod_95_no_months <- update(mod_95, . ~ . - n_detection_months)
+
+anova(mod_95, mod_95_no_size)
+anova(mod_95, mod_95_no_sex)
+anova(mod_95, mod_95_no_months)
+```
+
+Diagnostic plots
+```{r}
+plot_lmer_diag(mod_50) #leverage and cook's distance plots
+plot_lmer_diag(mod_95)
+```
+
+```{r}
+plot_lmer_rand_diag(mod_50, random="shark_ID") #random intercepts and normal Q-Q plots
+```
+
+# MCP models
+```{r}
+mod_mcp <- lmer(
+  log_mcp_100 ~ size + sex + n_detection_months + (1 | shark_ID),
+  data = mod_df,
+  REML = FALSE)
+
+summary(mod_mcp)
+
+# Dropping each predictor
+mod_mcp_no_size <- update(mod_mcp, . ~ . - size)
+mod_mcp_no_sex <- update(mod_mcp, . ~ . - sex)
+mod_mcp_no_months <- update(mod_mcp, . ~ . - n_detection_months)
+
+anova(mod_mcp, mod_mcp_no_size)
+anova(mod_mcp, mod_mcp_no_sex)
+anova(mod_mcp, mod_mcp_no_months)
+```
+
+Diagnostics
+```{r}
+par(mfrow = c(1, 2))
+
+plot(
+  fitted(mod_mcp),
+  resid(mod_mcp),
+  xlab = "Fitted values",
+  ylab = "Residuals"
+)
+abline(h = 0, lty = 2)
+
+qqnorm(resid(mod_mcp))
+qqline(resid(mod_mcp))
+
+par(mfrow = c(1, 1))
+
+isSingular(mod_mcp)
+```
+
+# Export model results table
+```{r}
+make_results_table <- function(model_ml, metric) {
+  
+  # Refit full model with REML for coefficient estimates
+  model_reml <- update(model_ml, REML = TRUE)
+  
+  # Fixed-effect estimates and SE
+  sm <- coef(summary(model_reml))
+  
+  # Profile 95% confidence intervals
+  ci <- confint(
+    model_reml,
+    parm = rownames(sm),
+    method = "profile")
+  
+  # Likelihood-ratio test helper
+  get_lrt <- function(term) {
+    
+    reduced <- update(
+      model_ml,
+      formula. = as.formula(paste(". ~ . -", term)))
+    
+    a <- anova(reduced, model_ml)
+    
+    c(
+      chisq = a$Chisq[2],
+      df    = a$Df[2],
+      p = a$`Pr(>Chisq)`[2])
+  }
+  
+  # LRTs from ML models
+  lrt_size   <- get_lrt("size")
+  lrt_sex    <- get_lrt("sex")
+  lrt_months <- get_lrt("n_detection_months")
+  
+  # Fixed-effect names
+  sex_coef <- grep("^sex", rownames(sm), value = TRUE)[1]
+  
+  coef_names <- c(
+    "(Intercept)",
+    "size",
+    sex_coef,
+    "n_detection_months")
+  
+  labels <- c(
+    "Intercept",
+    "Size",
+    "Sex (male)",
+    "Detection months")
+  
+  chisq <- c(NA, lrt_size["chisq"], lrt_sex["chisq"], lrt_months["chisq"])
+  df <- c(NA, lrt_size["df"], lrt_sex["df"], lrt_months["df"])
+  p <- c(NA, lrt_size["p"], lrt_sex["p"], lrt_months["p"])
+  
+  data.frame(
+    Metric = c(metric, "", "", ""),
+    Parameter = labels,
+    
+    Estimate = sprintf("%.4f", sm[coef_names, "Estimate"]),
+    SE = sprintf("%.4f", sm[coef_names, "Std. Error"]),
+    
+    `95% CI` = paste0("(", sprintf("%.4f", ci[coef_names, 1]),", ",sprintf("%.4f", ci[coef_names, 2]),")"),
+    
+    `χ²` = ifelse(
+      is.na(chisq),
+      "-",
+      sprintf("%.2f", chisq)),
+    
+    df = ifelse(
+      is.na(df),
+      "-",
+      sprintf("%.0f", df)),
+    
+    P = ifelse(
+      is.na(p),
+      "-",
+      ifelse(
+        p < 0.001,
+        "<0.001",
+        sprintf("%.3f", p))),
+    
+    check.names = FALSE)
+}
+
+# Generate all three sections
+table_50 <- make_results_table(mod_50, "50% KUD")
+table_95 <- make_results_table(mod_95, "95% KUD")
+table_mcp <- make_results_table(mod_mcp, "100% MCP")
+
+# Combine
+model_results_table <- rbind(
+  table_50,
+  table_95,
+  table_mcp)
+
+# Save to Excel
+writexl::write_xlsx(
+  model_results_table, file.path(
+    tables_dir,
+  "model_results_table.xlsx"))
+```
+
+# Piecewise analysis
+
+Fit models
+95%
+```{r}
+maturity_size <- 166
+
+mod_df <- mod_df %>%
+  mutate(
+    size_maturity = size - maturity_size,
+    pre_maturity  = pmin(0, size_maturity),
+    post_maturity = pmax(0, size_maturity))
+
+mod_95_maturity_base <- lmer(
+  log_kud_95 ~ size_maturity + sex + n_detection_months +
+    (1 | shark_ID),
+  data = mod_df,
+  REML = FALSE)
+
+mod_95_broken_stick <- lmer(
+  log_kud_95 ~ pre_maturity + post_maturity +
+    sex + n_detection_months +
+    (1 | shark_ID),
+  data = mod_df,
+  REML = FALSE)
+
+anova(mod_95_maturity_base, mod_95_broken_stick)
+summary(mod_95_broken_stick)
+```
+
+50%
+```{r}
+mod_50_maturity_base <- lmer(
+  log_kud_50 ~ size_maturity + sex + n_detection_months +
+    (1 | shark_ID),
+  data = mod_df,
+  REML = FALSE)
+
+mod_50_broken_stick <- lmer(
+  log_kud_50 ~ pre_maturity + post_maturity +
+    sex + n_detection_months +
+    (1 | shark_ID),
+  data = mod_df,
+  REML = FALSE)
+
+anova(mod_50_maturity_base, mod_50_broken_stick)
+summary(mod_50_broken_stick)
+```
+
+MCP
+```{r}
+mcp_maturity_base <- lmer(
+  log_mcp_100 ~ size_maturity + sex + n_detection_months +
+    (1 | shark_ID),
+  data = mod_df,
+  REML = FALSE)
+
+mcp_broken_stick <- lmer(
+  log_mcp_100 ~ pre_maturity + post_maturity +
+    sex + n_detection_months +
+    (1 | shark_ID),
+  data = mod_df,
+  REML = FALSE)
+
+anova(mcp_maturity_base, mcp_broken_stick)
+summary(mcp_broken_stick)
+```
+
+Piecewise model table
+Function: reports two slopes and associated CIs: below and above maturity threshold
+```{r}
+make_broken_stick_table <- function(base_model_ml,
+                                    broken_model_ml,
+                                    metric) {
+  # Estimates, SE and CI:
+  # refit the full broken-stick model using REML
+  model_reml <- update(broken_model_ml, REML = TRUE)
+
+  sm <- coef(summary(model_reml))
+
+  ci <- confint(
+    model_reml,
+    parm = rownames(sm),
+    method = "profile")
+
+  # Helper: likelihood-ratio test for individual terms
+  # Uses ML model (REML = FALSE)
+
+  get_lrt <- function(term) {
+
+    reduced <- update(
+      broken_model_ml,
+      formula. = as.formula(
+        paste(". ~ . -", term)))
+
+    a <- anova(reduced, broken_model_ml)
+
+    c(
+      chisq = a$Chisq[2],
+      df = a$Df[2],
+      p = a$`Pr(>Chisq)`[2])
+  }
+  
+  # Individual fixed-effect tests
+  lrt_below  <- get_lrt("pre_maturity")
+  lrt_above  <- get_lrt("post_maturity")
+  lrt_sex    <- get_lrt("sex")
+  lrt_months <- get_lrt("n_detection_months")
+
+  # Main maturity-threshold test:
+  # one slope vs broken stick
+  a_change <- anova(
+    base_model_ml,
+    broken_model_ml)
+
+  change_chisq <- a_change$Chisq[2]
+  change_df    <- a_change$Df[2]
+  change_p     <- a_change$`Pr(>Chisq)`[2]
+
+  # Coefficient names
+  sex_coef <- grep(
+    "^sex",
+    rownames(sm),
+    value = TRUE)[1]
+
+  coef_names <- c(
+    "(Intercept)",
+    "pre_maturity",
+    "post_maturity",
+    sex_coef,
+    "n_detection_months")
+
+  labels <- c(
+    "Intercept (166 cm)",
+    "Slope below maturity",
+    "Slope above maturity",
+    "Sex (male)",
+    "Detection months")
+
+  chisq <- c(NA, lrt_below["chisq"], lrt_above["chisq"], lrt_sex["chisq"], lrt_months["chisq"])
+  df <- c(NA, lrt_below["df"], lrt_above["df"], lrt_sex["df"], lrt_months["df"])
+  p <- c(NA, lrt_below["p"], lrt_above["p"], lrt_sex["p"], lrt_months["p"])
+
+  # Full model coefficient rows
+  out <- data.frame(
+    Metric = c(metric, "", "", "", ""),
+    Parameter = labels,
+
+    Estimate = sprintf(
+      "%.4f",
+      sm[coef_names, "Estimate"]),
+
+    SE = sprintf(
+      "%.4f",
+      sm[coef_names, "Std. Error"]),
+
+    `95% CI` = paste0(
+      "(",
+      sprintf("%.4f", ci[coef_names, 1]),
+      ", ",
+      sprintf("%.4f", ci[coef_names, 2]),
+      ")"),
+
+    `χ²` = ifelse(
+      is.na(chisq),
+      "-",
+      sprintf("%.2f", chisq)),
+    
+    df = ifelse(
+      is.na(df),
+      "-",
+      sprintf("%.0f", df)),
+
+    P = ifelse(
+      is.na(p),
+      "-",
+      ifelse(
+        p < 0.001,
+        "<0.001",
+        sprintf("%.3f", p))),
+
+    check.names = FALSE)
+
+  # Extra row: does slope change at 166 cm?
+  change_row <- data.frame(
+    Metric = "",
+    Parameter = "Change in slope at 166 cm",
+    Estimate = "-",
+    SE = "-",
+    `95% CI` = "-",
+
+    `χ²` = sprintf(
+      "%.2f",
+      change_chisq),
+
+    df = sprintf(
+      "%.0f",
+      change_df),
+
+    P = ifelse(
+      change_p < 0.001,
+      "<0.001",
+      sprintf("%.3f", change_p)),
+
+    check.names = FALSE)
+  
+  rbind(out, change_row)
+}
+```
+
+Run function
+```{r}
+table_bs_50 <- make_broken_stick_table(
+  mod_50_maturity_base,
+  mod_50_broken_stick,
+  "50% KUD")
+
+table_bs_95 <- make_broken_stick_table(
+  mod_95_maturity_base,
+  mod_95_broken_stick,
+  "95% KUD")
+
+table_bs_mcp <- make_broken_stick_table(
+  mcp_maturity_base,
+  mcp_broken_stick,
+  "100% MCP")
+
+broken_stick_results_table <- rbind(
+  table_bs_50,
+  table_bs_95,
+  table_bs_mcp)
+```
+
+```{r}
+writexl::write_xlsx(
+  broken_stick_results_table,
+  file.path(
+    tables_dir,
+    "broken_stick_model_results_table.xlsx"))
+```
+
+Results Report
+```{r}
+adult_effect_10cm <- function(model_ml, metric) {
+
+  # Refit with REML so estimates/CIs match the supplementary table
+  model_reml <- update(model_ml, REML = TRUE)
+
+  # Adult slope (above 166 cm)
+  beta <- fixef(model_reml)["post_maturity"]
+
+  # Profile 95% CI for adult slope
+  ci <- confint(
+    model_reml,
+    parm = "post_maturity",
+    method = "profile"
+  )
+
+  # Convert log10 slope to % change in area per 10 cm
+  pct <- (10^(10 * beta) - 1) * 100
+
+  pct_low  <- (10^(10 * ci[1]) - 1) * 100
+  pct_high <- (10^(10 * ci[2]) - 1) * 100
+
+  data.frame(
+    Metric = metric,
+    Beta_adult = beta,
+    Percent_per_10cm = pct,
+    CI_low = pct_low,
+    CI_high = pct_high
+  )
+}
+```
+
+```{r}
+adult_50 <- adult_effect_10cm(
+  mod_50_broken_stick,
+  "50% KUD")
+
+adult_95 <- adult_effect_10cm(
+  mod_95_broken_stick,
+  "95% KUD")
+
+adult_mcp <- adult_effect_10cm(
+  mcp_broken_stick,
+  "100% MCP")
+
+adult_effects <- rbind(
+  adult_50,
+  adult_95,
+  adult_mcp)
+```
+
+# Sensitivity analysis: influential observations
+
+Observation 85 had the highest Cook's distance in the 50% and 95% KUD model.
+Refit without this observation to assess whether it influenced inference.
+```{r}
+row85 <- rownames(model.frame(mod_95))[85]
+mod_df_no85 <- mod_df[rownames(mod_df) != row85, ]
+
+sensitivity_lrt <- function(response, metric) {
+  
+  full <- lmer(
+    as.formula(paste(
+      response,
+      "~ size + sex + n_detection_months + (1 | shark_ID)"
+    )),
+    data = mod_df_no85,
+    REML = FALSE)
+  
+  bind_rows(lapply(
+    c("size", "sex", "n_detection_months"),
+    function(term) {
+      reduced <- update(
+        full,
+        formula. = as.formula(paste(". ~ . -", term)))
+      
+      a <- anova(reduced, full)
+      
+      tibble(
+        metric = metric,
+        predictor = term,
+        chisq = a$Chisq[2],
+        p = a$`Pr(>Chisq)`[2])}
+  ))
+}
+
+sensitivity_results <- bind_rows(
+  sensitivity_lrt("log_kud_50", "50% KDE"),
+  sensitivity_lrt("log_kud_95", "95% KDE"),
+  sensitivity_lrt("log_mcp_100", "100% MCP"))
+
+sensitivity_results
+```

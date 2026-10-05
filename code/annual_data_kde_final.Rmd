@@ -1,0 +1,293 @@
+---
+title: "Annual space-use metrics"
+author: "Maxine Chapman"
+date: "2026-07-23"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Creating annual results df
+
+This code creates an annual dataframe with one row per shark per year. Each row contains basic tracking information on the shark and calculates area metrics including kde and mcp. 
+
+## Setup
+```{r cars}
+rm(list =ls())
+library(tidytracks)
+library(dplyr)
+library(lubridate)
+```
+
+```{r}
+# raw detection data
+df <- read.csv("../data/intermediate/combined_sharks.csv")
+
+# 60-minute centre-of-activity positions
+coa_df <- read.csv("../data/intermediate/combined_sharks_coa.csv")
+
+# local equal-area projection used for spatial area calculations
+local_laea <- "+proj=laea +lat_0=-5.4 +lon_0=53 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs +ellps=WGS84 +towgs84=0,0,0"
+
+study_years <- 2012:2021
+maturity_cutoff <- 166
+```
+
+```{r}
+df$year <- lubridate::year(as.POSIXct(df$ISO.date, tz = "UTC", format = "%Y-%m-%d %H:%M:%OS"))
+coa_df$year <- lubridate::year(as.POSIXct(coa_df$ISO.date, tz = "UTC", format = "%Y-%m-%d %H:%M:%S"))
+
+# Remove detections without a complete date-time
+df <- df %>%
+  filter(!is.na(year))
+
+stopifnot(!any(is.na(df$year)))
+stopifnot(!any(is.na(coa_df$year)))
+```
+
+```{r}
+#add in shark metadata
+summary_sharks <- read.csv("../data/raw/acoustic_metadata/lemon_summary_read_updated.csv")
+```
+
+Read in our data processing functions which include calculating MCP area and algorithms to estimate shark size in a given year, using a VBGF curve with precaudal length based on Brown and Gruber (1988).
+
+```{r}
+source("03_data_processing_functions_MC.R")
+```
+
+## Create results df
+
+Create the annual results dataframe. This stores one row per shark per year, including tracking effort, estimated size, sex, maturity, and annual space-use metrics.
+```{r}
+cols <- c("shark_ID", 
+              "year", 
+              "size",
+              "num_detections", 
+              "num_receivers", 
+              "min_date", 
+              "max_date", 
+              "n_tracking_days",
+              "n_detection_months",
+              "max_internal_gap_days",
+              "tracking_period",
+              "sex",
+              "maturity",
+              "n_kde_positions",
+              "kde_area_95",
+              "kde_area_50",
+              "mcp_area_100")
+results_df <- data.frame(matrix(nrow = 0, ncol = length(cols)))
+colnames(results_df) <- cols
+```
+
+```{r}
+data_names_list <- unique(df$FishID)
+years_list <- study_years
+```
+
+Create dataframe for maximum gap between detection days (annually). This will be joined to the metadata table in the metadata script
+```{r}
+# one row per shark: maximum gap between detection days
+detection_gap_df <- data.frame(
+  FishID = character(),
+  max_detection_gap_days = integer())
+```
+
+```{r}
+for (i_shark in 1:length(data_names_list)) {
+  
+  #get shark data
+  shark_ID <- data_names_list[i_shark]
+  shark_file <- df[df$FishID == shark_ID, ]
+  # get COA data for the same shark
+  shark_coa_file <- coa_df[coa_df$FishID == shark_ID, ]
+  
+  # calculate maximum gap between consecutive detection days
+  detection_days <- shark_file %>%
+    mutate(detection_date = as.Date(ISO.date)) %>%
+    distinct(detection_date) %>%
+    arrange(detection_date)
+
+    max_gap <- if (nrow(detection_days) > 1) {
+      max(as.integer(diff(detection_days$detection_date)) - 1) } else { NA_integer_}
+
+    detection_gap_df <- rbind(
+      detection_gap_df,
+      data.frame(FishID = shark_ID, max_detection_gap_days = max_gap))
+  
+  #make results dataframe
+  for(i_year in 1:length(years_list)){
+    
+    #get dates for 1 year
+    this_year <- years_list[i_year]    
+    start_year <- paste0(this_year, "-01-01")
+    end_year <- paste0(this_year+1, "-01-01")
+    
+    #subset data
+    subset_data <- shark_file[shark_file$ISO.date > start_year & shark_file$ISO.date < end_year, ]
+    # subset COA positions for the same shark and year
+    subset_coa <- shark_coa_file[shark_coa_file$ISO.date > start_year &shark_coa_file$ISO.date < end_year, ]
+    
+    # only run code if there is data available for that year
+    if(nrow(subset_data) == 0){
+      next # no data skip to next iteration in loop
+    }
+    
+    shark_number <- subset_data$FishID[1]
+    year <- this_year
+    
+    #calculate shark size using function
+    shark_size <- calc_shark_size(shark_number, year, summary_sharks)
+    
+    #get number of detections
+    num_detections <- nrow(subset_data)
+    
+    #round data so hashmap can use long and lat to get ID
+    subset_data$Lat <- round(subset_data$Lat,3)
+    subset_data$Long <- round(subset_data$Long,3)
+
+    #number of unique receivers used
+    num_receivers <- nrow(unique(data.frame(id = subset_data$FishID, lon =  subset_data$Long, lat = subset_data$Lat)))
+    
+    # use 60-minute COA positions for spatial analyses
+    subset_kde <- subset_coa
+
+    if (nrow(subset_kde) == 0) {
+      stop("No COA positions available for shark ",shark_number, " in ", year)}
+
+    kde_method <- "COA_60min"
+    n_kde_positions <- nrow(subset_kde)
+    
+    #kde areas
+    subset_tt <- tt_read_data(
+      events = subset_kde,
+      col_track_id = "FishID",
+      col_coords = c("Long", "Lat"),
+      col_date_time = "ISO.date",
+      time_zone = "UTC",
+      format_date_time = "%Y-%m-%d %H:%M:%OS",
+      crs = 4326)
+    
+    # project COA positions to local LAEA before KDE
+    # project before KDE
+    subset_tt <- sf::st_transform(subset_tt, crs = local_laea)
+    
+    coords_range <- diff(range(sf::st_coordinates(subset_tt)[, 1])) +
+      diff(range(sf::st_coordinates(subset_tt)[, 2]))
+    
+    if (coords_range == 0) {
+      kde_area_50 <- NA_real_
+      kde_area_95 <- NA_real_
+    } else {
+      kde_data <- subset_tt %>%
+        hr_kde(levels = c(0.5, 0.95)) %>%
+        mutate(area = set_units(area, "km^2"))
+      
+      kde_area_50 <- kde_data$area[kde_data$level == 0.5]
+      kde_area_95 <- kde_data$area[kde_data$level == 0.95]
+      kde_area_50 <- if (length(kde_area_50) == 0) NA_real_ else as.numeric(kde_area_50)
+      kde_area_95 <- if (length(kde_area_95) == 0) NA_real_ else as.numeric(kde_area_95)
+    }
+
+    # MCP calculations from the same 60-min COAs used for KDE
+    n_unique_coa_positions <- nrow(unique(subset_coa[, c("Long", "Lat")]))
+
+    if (nrow(subset_coa) >= 5 && n_unique_coa_positions >= 3) {
+        mcp_area <- calc_mcp_area(subset_coa, 100)
+        mcp_area_95 <- calc_mcp_area(subset_coa, 95)
+        mcp_area_90 <- calc_mcp_area(subset_coa, 90)
+        mcp_area_80 <- calc_mcp_area(subset_coa, 80)
+        mcp_area_75 <- calc_mcp_area(subset_coa, 75)
+        mcp_area_70 <- calc_mcp_area(subset_coa, 70)
+        mcp_area_60 <- calc_mcp_area(subset_coa, 60)
+    } else {
+        mcp_area <- NA_real_
+      mcp_area_95 <- NA_real_
+      mcp_area_90 <- NA_real_
+      mcp_area_80 <- NA_real_
+      mcp_area_75 <- NA_real_
+      mcp_area_70 <- NA_real_
+      mcp_area_60 <- NA_real_
+}
+    
+    #dates
+    min_date <- min(subset_data$ISO.date)
+    max_date <- max(subset_data$ISO.date)
+    
+    tracking_period <- round(difftime(max_date, min_date, units = "days"), 3)
+    
+    # unique calendar days on which shark was detected
+    detection_dates <- sort(unique(lubridate::date(subset_data$ISO.date)))
+    # number of detection days
+    n_tracking_days <- length(detection_dates)
+    # number of calendar months containing at least one detection
+    n_detection_months <- length(unique(lubridate::month(detection_dates)))
+    # longest period without a detection between two detected days
+    if (length(detection_dates) > 1) {
+      max_internal_gap_days <- max(as.numeric(diff(detection_dates)) - 1)
+    } else {
+    max_internal_gap_days <- NA_real_}
+
+    #get shark sex from summary document
+    shark_sex <- summary_sharks[summary_sharks$FishID == shark_ID, "Sex"]
+
+    if (shark_size >= maturity_cutoff){
+          maturity <- "mature"
+    } else {
+          maturity <- "immature"
+    }
+    
+    #combine data into row
+    new_row <- data.frame("shark_ID" = shark_number,
+                          "year" = year, 
+                          "size" = shark_size,
+                          "num_detections" = num_detections,
+                          "num_receivers" = num_receivers, 
+                          "min_date" = min_date, 
+                          "max_date" = max_date, 
+                          "n_tracking_days" = n_tracking_days,
+                          "n_detection_months" = n_detection_months,
+                          "max_internal_gap_days" = max_internal_gap_days,
+                          "tracking_period" = tracking_period,
+                          "sex" = shark_sex,
+                          "maturity" = maturity,
+                          "n_kde_positions" = n_kde_positions,
+                          "kde_area_95" = kde_area_95,
+                          "kde_area_50" = kde_area_50,
+                          "mcp_area_100" = mcp_area)
+    
+    
+    if(length(new_row)!= length(cols)){
+      stop("row is incomplete for shark ", shark_ID,": ", new_row)
+    } else {
+      
+      #add to results df
+      results_df <- rbind(results_df, new_row)
+      
+    }
+  }
+}
+```
+
+Save results df
+```{r}
+write.csv(
+  results_df,
+  "../results/results_annual_kde_coa.csv",
+  row.names = FALSE
+)
+```
+
+Save max no detection gap
+```{r}
+write.csv(
+  detection_gap_df,
+  "../results/metadata/shark_detection_gaps.csv",
+  row.names = FALSE
+)
+```
