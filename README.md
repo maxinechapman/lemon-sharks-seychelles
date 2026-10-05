@@ -20,27 +20,30 @@ Defines mixed-model diagnostic and random-effect plotting functions used by the 
 ## MAIN RUN ORDER
 Please note that the raw data used in 1, 2 and our seasonality analysis cannot be made publicly available because it contains spatially explicit data for an endangered species. Therefore we have provided the intermediate results tables results_annual_kde_coa.csv for the main analysis and results_monthly.csv for the seasonality analysis. Further analysis from 3 onwards or within the seasonality document can be continued in full.
 
-1. 2026_08_30_COA.Rmd
+1. 01_COA.Rmd
 Reads combined_sharks.csv, projects receiver locations to the local LAEA coordinate system, compares candidate time bins and calculates detection-weighted 60-minute centres of activity (COAs). It validates the calculations and writes data/intermediate/combined_sharks_coa.csv.
 
-2. 2026_09_15_annual_data_kde_GP.Rmd
+2. 02_annual_data_kde.Rmd
 Creates one row per shark-year, including estimated size, detection coverage, projected COA-based KDE50/KDE95 areas and COA-based MCP areas. It writes results/results_annual_kde_coa.csv
 
-3. 2026_09_14_metadata_GP.R
+3. 03_metadata.R
 Combines the annual results with capture metadata to make one summary row per shark, including tagging/final sizes, tracking duration, detections and maturity at tagging and final detection. It writes results/metadata/shark_metadata_full.csv and shark_metadata_full.rds, which are required by the seasonality script.
 
-4. 2026_09_14_filtering.Rmd
+4. 04_filtering.Rmd
 Applies the final annual-analysis criteria: valid KDE50 and KDE95, at least 50 COAs and at least six detection months for KUDs; MCP100 needs temporal coverage and a valid positive estimate. It saves separate KDE and MCP model datasets, and COAs joined to the annual inclusion flags (for plotting polygons) in data/intermediate.
 
-5. 2026_09_11_modelling.Rmd
+5. 05_modelling.Rmd
 Reads the filtered RDS files and fits the KDE50, KDE95 and MCP100 mixed models against size, sex and detection months, with shark ID as a random intercept. It also runs diagnostics, plots the spatial relationships and KDE ratio, examines selected large-range cases and tests alternative maturity-threshold effects.
+
+6. 06_figures.Rmd
+Creates figures for publication.
 
 ## ADDITIONAL ANALYSES
 
-2026_08_30_growth_morphometrics.Rmd — RUN AFTER STEP 2
+growth_morphometrics.Rmd — RUN AFTER STEP 2
 Fits and checks the TL–PCL relationship, evaluates the Brown–Gruber growth curve against Stevens data and converts published life-stage thresholds into PCL.
 
-2026_09_14_seasonality_GP.Rmd — RUN AFTER STEP 3
+seasonality.Rmd — RUN AFTER STEP 3
 Uses raw detections plus shark_metadata_full.rds to calculate monthly residency, including genuine zero-detection months, for either the full array or the atoll receiver subset. It writes results_monthly.csv/.rds and residency figures, then fits a beta-binomial mixed model testing whether seasonal residency changes with shark size.
 
 
